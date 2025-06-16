@@ -5,9 +5,8 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from telegram import Bot, Update
-from telegram.ext import Application, MessageHandler, filters
+from telegram.ext import Application, MessageHandler, filters, CallbackContext
 from loguru import logger
-import aiohttp
 
 from config.settings import settings
 from ai.analyzer import analyzer
@@ -30,7 +29,7 @@ class TelegramPost:
 
 
 class HighSpeedTelegramMonitor:
-    """Ультра-быстрый мониторинг Telegram с интервалом 1 секунда"""
+    """Простой и надежный мониторинг Telegram"""
 
     def __init__(self, trading_callback=None):
         self.bot: Optional[Bot] = None
@@ -39,13 +38,10 @@ class HighSpeedTelegramMonitor:
 
         # Отслеживание
         self.monitored_chats: Set[str] = set()
-        self.last_message_ids: Dict[int, int] = {}  # chat_id -> last_message_id
-        self.processed_messages: Set[str] = set()  # Предотвращение дублирования
+        self.processed_messages: Set[str] = set()
 
         # Производительность
         self.running = False
-        self.last_check_time = 0
-        self.check_interval = settings.monitoring.telegram_interval
 
         # Статистика
         self.stats = {
@@ -64,8 +60,10 @@ class HighSpeedTelegramMonitor:
             return False
 
         try:
-            # Инициализация бота
+            # Простая инициализация бота
             self.bot = Bot(token=settings.monitoring.telegram_bot_token)
+
+            # Простое создание приложения
             self.app = Application.builder().token(settings.monitoring.telegram_bot_token).build()
 
             # Настройка обработчиков
@@ -82,11 +80,11 @@ class HighSpeedTelegramMonitor:
             # Подключение к каналам мониторинга
             await self.setup_monitoring_channels()
 
-            # Запуск цикла мониторинга
+            # Запуск мониторинга
             self.running = True
-            asyncio.create_task(self.monitoring_loop())
+            asyncio.create_task(self.run_bot())
 
-            logger.success("✅ Высокоскоростной Telegram монитор запущен")
+            logger.success("✅ Telegram монитор запущен")
             return True
 
         except Exception as e:
@@ -97,23 +95,19 @@ class HighSpeedTelegramMonitor:
         """Остановка монитора"""
         self.running = False
         if self.app:
-            await self.app.stop()
-            await self.app.shutdown()
+            try:
+                await self.app.updater.stop()
+                await self.app.stop()
+                await self.app.shutdown()
+            except Exception as e:
+                logger.debug(f"Ошибка остановки app: {e}")
         logger.info("🛑 Telegram монитор остановлен")
 
     def setup_handlers(self):
         """Настройка обработчиков сообщений"""
-        # Обработка всех сообщений (каналы и группы)
-        self.app.add_handler(MessageHandler(
-            filters.ALL,
-            self.handle_message
-        ))
-
-        # Обработка отредактированных сообщений
-        self.app.add_handler(MessageHandler(
-            filters.ALL,
-            self.handle_edited_message
-        ))
+        # Обработка всех сообщений
+        message_handler = MessageHandler(filters.ALL, self.handle_message)
+        self.app.add_handler(message_handler)
 
     async def setup_monitoring_channels(self):
         """Настройка каналов и групп для мониторинга"""
@@ -136,7 +130,7 @@ class HighSpeedTelegramMonitor:
             except Exception as e:
                 logger.error(f"❌ Ошибка настройки мониторинга {channel}: {e}")
 
-        # Настройка групп (включая топики)
+        # Настройка групп
         for group in settings.monitoring.telegram_groups:
             if not group:
                 continue
@@ -161,87 +155,77 @@ class HighSpeedTelegramMonitor:
 
         logger.info(f"✅ Настроено мониторинга для {len(self.monitored_chats)} чатов")
 
-    async def monitoring_loop(self):
-        """Основной цикл мониторинга - проверка каждую секунду"""
-        logger.info("🔍 Запуск высокоскоростного цикла мониторинга (интервал 1 секунда)")
+    async def run_bot(self):
+        """Запуск бота с polling"""
+        logger.info("🔍 Запуск Telegram polling...")
+
+        try:
+            # Запускаем polling
+            await self.app.updater.start_polling(
+                poll_interval=2.0,  # Каждые 2 секунды
+                timeout=20,
+                bootstrap_retries=-1
+            )
+
+            # Ждем пока бот работает
+            while self.running:
+                await asyncio.sleep(1)
+
+        except Exception as e:
+            logger.error(f"❌ Ошибка в polling: {e}")
+            # Fallback на manual polling если не работает
+            await self.manual_polling()
+        finally:
+            try:
+                await self.app.updater.stop()
+            except:
+                pass
+
+    async def manual_polling(self):
+        """Ручной polling если автоматический не работает"""
+        logger.info("🔄 Переключение на ручной polling...")
+
+        last_update_id = 0
 
         while self.running:
             try:
-                start_time = time.time()
-
-                # Проверяем новые сообщения во всех отслеживаемых чатах
-                await self.check_new_messages()
-
-                # Обновляем статистику времени
-                processing_time = time.time() - start_time
-                self.stats['avg_processing_time'] = (
-                        self.stats['avg_processing_time'] * 0.9 + processing_time * 0.1
+                # Получаем обновления
+                updates = await self.bot.get_updates(
+                    offset=last_update_id + 1,
+                    timeout=10,
+                    limit=100
                 )
 
-                # Ждем оставшееся время для поддержания интервала в 1 секунду
-                sleep_time = max(0, self.check_interval - processing_time)
-                if sleep_time > 0:
-                    await asyncio.sleep(sleep_time)
-                else:
-                    logger.warning(f"⚠️ Цикл мониторинга превышает время: {processing_time:.3f}s")
+                for update in updates:
+                    last_update_id = update.update_id
 
-            except asyncio.CancelledError:
-                break
+                    # Обрабатываем сообщения
+                    if update.message:
+                        await self.handle_message_direct(update.message, is_edit=False)
+                    elif update.edited_message:
+                        await self.handle_message_direct(update.edited_message, is_edit=True)
+
+                # Небольшая пауза между запросами
+                await asyncio.sleep(1)
+
             except Exception as e:
-                logger.error(f"❌ Ошибка в цикле мониторинга: {e}")
-                self.stats['errors'] += 1
-                await asyncio.sleep(1)  # Предотвращение быстрого повтора ошибок
-
-    async def check_new_messages(self):
-        """Проверка новых сообщений во всех отслеживаемых чатах"""
-        tasks = []
-
-        for channel in self.monitored_chats:
-            task = asyncio.create_task(self.check_channel_messages(channel))
-            tasks.append(task)
-
-        # Ждем завершения проверки всех каналов
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
-
-    async def check_channel_messages(self, channel: str):
-        """Проверка новых сообщений в конкретном канале"""
-        try:
-            # Получаем последние обновления из канала
-            updates = await self.bot.get_updates(
-                offset=-1,  # Получаем только последнее обновление
-                limit=100,
-                timeout=1
-            )
-
-            for update in updates:
-                if update.message or update.edited_message:
-                    message = update.message or update.edited_message
-
-                    # Проверяем, относится ли это сообщение к отслеживаемому чату
-                    if self.is_monitored_chat(message.chat):
-                        await self.process_message(message, update.edited_message is not None)
-
-        except Exception as e:
-            logger.debug(f"Ошибка проверки канала {channel}: {e}")
+                logger.error(f"❌ Ошибка manual polling: {e}")
+                await asyncio.sleep(5)
 
     def is_monitored_chat(self, chat) -> bool:
         """Проверка, отслеживается ли чат"""
         chat_identifier = f"@{chat.username}" if chat.username else str(chat.id)
         return chat_identifier in self.monitored_chats
 
-    async def handle_message(self, update: Update, context):
-        """Обработка новых сообщений"""
-        if update.message:
-            await self.process_message(update.message, is_edit=False)
+    async def handle_message(self, update: Update, context: CallbackContext):
+        """Обработка новых сообщений через handler"""
+        if update.message and self.is_monitored_chat(update.message.chat):
+            await self.handle_message_direct(update.message, is_edit=False)
+        elif update.edited_message and self.is_monitored_chat(update.edited_message.chat):
+            await self.handle_message_direct(update.edited_message, is_edit=True)
 
-    async def handle_edited_message(self, update: Update, context):
-        """Обработка отредактированных сообщений"""
-        if update.edited_message:
-            await self.process_message(update.edited_message, is_edit=True)
-
-    async def process_message(self, message, is_edit: bool = False):
-        """Обработка одного сообщения с максимальной скоростью"""
+    async def handle_message_direct(self, message, is_edit: bool = False):
+        """Прямая обработка сообщения"""
         try:
             start_time = time.time()
 
@@ -263,7 +247,7 @@ class HighSpeedTelegramMonitor:
                 else:
                     self.stats['admin_messages'] += 1
 
-            # Проверяем топики (если поддерживаются)
+            # Проверяем топики
             thread_id = None
             if hasattr(message, 'message_thread_id') and message.message_thread_id:
                 thread_id = message.message_thread_id
@@ -272,7 +256,7 @@ class HighSpeedTelegramMonitor:
             # Извлекаем данные поста
             post = await self.extract_post_data(message, is_edit, is_admin_msg, thread_id)
 
-            # УЛЬТРА-БЫСТРЫЙ АНАЛИЗ
+            # Быстрый анализ
             analysis_result = await analyzer.analyze_post(
                 content=post.content,
                 platform="telegram",
@@ -282,17 +266,15 @@ class HighSpeedTelegramMonitor:
 
             processing_time = (time.time() - start_time) * 1000
 
-            logger.info(f"📱 Обработано Telegram сообщение за {processing_time:.1f}ms | "
-                        f"Контракт: {analysis_result.has_contract} | "
-                        f"Уверенность: {analysis_result.confidence:.2f} | "
-                        f"Админ: {is_admin_msg}")
+            logger.info(f"📱 Telegram сообщение ({processing_time:.1f}ms): "
+                        f"контракт={analysis_result.has_contract} | "
+                        f"уверенность={analysis_result.confidence:.2f}")
 
-            # Если обнаружен контракт с высокой уверенностью, запускаем торговлю немедленно
+            # Если обнаружен контракт с высокой уверенностью
             if analysis_result.has_contract and analysis_result.confidence > 0.6:
                 logger.critical(f"🚨 КОНТРАКТ ОБНАРУЖЕН: {analysis_result.addresses}")
 
                 if self.trading_callback:
-                    # Fire and forget - не ждем завершения торговли
                     asyncio.create_task(self.trigger_trading(analysis_result, post))
 
                 self.stats['contracts_found'] += 1
@@ -301,10 +283,9 @@ class HighSpeedTelegramMonitor:
             self.processed_messages.add(message_key)
             self.stats['messages_processed'] += 1
 
-            # Очистка старых обработанных сообщений (предотвращение утечки памяти)
-            if len(self.processed_messages) > 10000:
-                # Удаляем 1000 самых старых записей
-                old_messages = list(self.processed_messages)[:1000]
+            # Очистка памяти
+            if len(self.processed_messages) > 1000:
+                old_messages = list(self.processed_messages)[:200]
                 for old_msg in old_messages:
                     self.processed_messages.discard(old_msg)
 
@@ -328,26 +309,58 @@ class HighSpeedTelegramMonitor:
                     if is_admin_message(username, message.from_user.id):
                         return True
 
-                # Проверяем статус в чате
+                # Проверяем статус в чате (с защитой от ошибок)
                 try:
                     member = await self.bot.get_chat_member(message.chat.id, message.from_user.id)
                     if member.status in ['creator', 'administrator']:
                         logger.info(f"✅ Админ сообщение от @{username or 'unknown'} ({member.status})")
                         return True
-                except:
-                    # Если не удалось получить статус, проверяем по списку админов
-                    pass
+                except Exception as e:
+                    logger.debug(f"Не удалось проверить статус в чате: {e}")
 
             return False
 
         except Exception as e:
             logger.debug(f"Ошибка проверки админа: {e}")
-            return False  # По умолчанию не админ
+            return False
 
     async def extract_post_data(self, message, is_edit: bool, is_admin: bool, thread_id: Optional[int]) -> TelegramPost:
-        """Извлечение структурированных данных из сообщения Telegram"""
-        # Получаем содержимое сообщения
+        """Извлечение данных из сообщения Telegram"""
+        # Получаем основное содержимое сообщения
         content = message.text or message.caption or ""
+
+        # ВАЖНО: Извлекаем URL из entities (гиперссылки)
+        full_content = content
+
+        if message.entities:
+            for entity in message.entities:
+                if entity.type in ['url', 'text_link']:
+                    if entity.type == 'url':
+                        # Прямая ссылка в тексте
+                        url_text = content[entity.offset:entity.offset + entity.length]
+                        full_content += f" {url_text}"
+                        logger.debug(f"📎 Найдена URL в тексте: {url_text}")
+                    elif entity.type == 'text_link':
+                        # Гиперссылка с текстом
+                        url_text = entity.url
+                        full_content += f" {url_text}"
+                        logger.debug(f"📎 Найдена гиперссылка: {url_text}")
+
+        # Также проверяем caption entities для медиа
+        if message.caption_entities:
+            for entity in message.caption_entities:
+                if entity.type in ['url', 'text_link']:
+                    if entity.type == 'url':
+                        url_text = (message.caption or "")[entity.offset:entity.offset + entity.length]
+                        full_content += f" {url_text}"
+                        logger.debug(f"📎 Найдена URL в caption: {url_text}")
+                    elif entity.type == 'text_link':
+                        url_text = entity.url
+                        full_content += f" {url_text}"
+                        logger.debug(f"📎 Найдена гиперссылка в caption: {url_text}")
+
+        # Логируем полный контент для отладки
+        logger.debug(f"📝 Полный контент сообщения: {full_content}")
 
         # Получаем информацию об авторе
         author = "Unknown"
@@ -362,29 +375,28 @@ class HighSpeedTelegramMonitor:
         if chat_username:
             url = f"https://t.me/{chat_username}/{message.message_id}"
 
-        # Извлекаем URL медиа
+        # Извлекаем URL медиа (с защитой от ошибок)
         media_urls = []
-        if message.photo:
-            # Получаем фото самого высокого разрешения
-            photo = max(message.photo, key=lambda p: p.file_size or 0)
-            try:
+        try:
+            if message.photo:
+                photo = max(message.photo, key=lambda p: p.file_size or 0)
                 file = await self.bot.get_file(photo.file_id)
                 media_urls.append(file.file_path)
-            except:
-                pass
+        except Exception as e:
+            logger.debug(f"Ошибка получения фото: {e}")
 
-        if message.document:
-            try:
+        try:
+            if message.document:
                 file = await self.bot.get_file(message.document.file_id)
                 media_urls.append(file.file_path)
-            except:
-                pass
+        except Exception as e:
+            logger.debug(f"Ошибка получения документа: {e}")
 
         return TelegramPost(
             message_id=message.message_id,
             chat_id=message.chat.id,
             chat_username=chat_username or str(message.chat.id),
-            content=content,
+            content=full_content,  # Используем полный контент с URL
             author=author,
             timestamp=message.date,
             url=url,
@@ -395,7 +407,7 @@ class HighSpeedTelegramMonitor:
         )
 
     async def trigger_trading(self, analysis_result, post: TelegramPost):
-        """Запуск торговой системы немедленно"""
+        """Запуск торговой системы"""
         try:
             trading_data = {
                 'platform': 'telegram',
@@ -411,11 +423,10 @@ class HighSpeedTelegramMonitor:
                 'thread_id': post.thread_id
             }
 
-            # Вызываем торговую систему
             await self.trading_callback(trading_data)
 
         except Exception as e:
-            logger.error(f"❌ Ошибка торгового обратного вызова: {e}")
+            logger.error(f"❌ Ошибка торгового вызова: {e}")
 
     async def health_check(self) -> Dict:
         """Проверка здоровья монитора"""
@@ -423,12 +434,15 @@ class HighSpeedTelegramMonitor:
             if not self.bot:
                 return {"status": "error", "message": "Бот не инициализирован"}
 
-            # Тестируем подключение бота
-            me = await self.bot.get_me()
+            try:
+                me = await asyncio.wait_for(self.bot.get_me(), timeout=5.0)
+                bot_healthy = True
+            except:
+                bot_healthy = False
 
             return {
-                "status": "healthy",
-                "bot_username": me.username,
+                "status": "healthy" if bot_healthy else "degraded",
+                "bot_username": me.username if bot_healthy else "unknown",
                 "monitored_channels": len(self.monitored_chats),
                 "running": self.running,
                 "stats": self.stats
@@ -443,8 +457,7 @@ class HighSpeedTelegramMonitor:
             **self.stats,
             "monitored_channels": len(self.monitored_chats),
             "processed_messages_cache": len(self.processed_messages),
-            "running": self.running,
-            "check_interval": self.check_interval
+            "running": self.running
         }
 
 

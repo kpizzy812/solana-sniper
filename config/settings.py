@@ -46,7 +46,7 @@ def convert_seed_to_private_key(seed_phrase: str) -> str:
 @dataclass
 class SolanaConfig:
     rpc_url: str = os.getenv('SOLANA_RPC_URL', 'https://api.devnet.solana.com')
-    network: str = 'devnet'  # devnet для тестов, mainnet-beta для продакшена
+    network: str = 'mainnet'  # devnet для тестов, mainnet-beta для продакшена
     private_key: str = ''
     commitment: str = 'confirmed'
 
@@ -185,7 +185,7 @@ class AIConfig:
 
     # Оптимизация скорости
     use_fast_analysis: bool = True  # Использовать regex в первую очередь
-    use_ai_confirmation: bool = False  # AI анализ в фоне
+    use_ai_confirmation: bool = False  # AI анализ отключен по умолчанию
     ai_timeout: float = 3.0  # Максимальное время для AI анализа
     cache_ai_results: bool = True
 
@@ -194,6 +194,11 @@ class AIConfig:
     urgent_keywords: List[str] = None
 
     def __post_init__(self):
+        # Автоматически включаем AI если есть ключ
+        if self.openai_api_key and not self.use_ai_confirmation:
+            self.use_ai_confirmation = True
+            logger.info("✅ AI анализ включен автоматически (найден OpenAI ключ)")
+
         if self._solana_address_patterns is None:
             self._solana_address_patterns = [
                 re.compile(r'\b[1-9A-HJ-NP-Za-km-z]{32,44}\b'),  # Solana адрес
@@ -202,7 +207,18 @@ class AIConfig:
                 re.compile(r'address[:\s]*([1-9A-HJ-NP-Za-km-z]{32,44})', re.IGNORECASE),
                 re.compile(r'ca[:\s]*([1-9A-HJ-NP-Za-km-z]{32,44})', re.IGNORECASE),
                 re.compile(r'токен[:\s]*([1-9A-HJ-NP-Za-km-z]{32,44})', re.IGNORECASE),
-                re.compile(r'контракт[:\s]*([1-9A-HJ-NP-Za-km-z]{32,44})', re.IGNORECASE)
+                re.compile(r'контракт[:\s]*([1-9A-HJ-NP-Za-km-z]{32,44})', re.IGNORECASE),
+                # Специальные паттерны для URL (Jupiter, DEX ссылки)
+                re.compile(r'jup\.ag/swap/[^-]*-([1-9A-HJ-NP-Za-km-z]{32,44})', re.IGNORECASE),
+                re.compile(r'raydium\.io/.*?([1-9A-HJ-NP-Za-km-z]{32,44})', re.IGNORECASE),
+                re.compile(r'dexscreener\.com/solana/([1-9A-HJ-NP-Za-km-z]{32,44})', re.IGNORECASE),
+                re.compile(r'birdeye\.so/token/([1-9A-HJ-NP-Za-km-z]{32,44})', re.IGNORECASE),
+                # Общие паттерны для URL параметров
+                re.compile(r'[?&]token=([1-9A-HJ-NP-Za-km-z]{32,44})', re.IGNORECASE),
+                re.compile(r'[?&]mint=([1-9A-HJ-NP-Za-km-z]{32,44})', re.IGNORECASE),
+                re.compile(r'[?&]address=([1-9A-HJ-NP-Za-km-z]{32,44})', re.IGNORECASE),
+                # Паттерн для разделенных через дефис адресов (как в Jupiter)
+                re.compile(r'[/-]([1-9A-HJ-NP-Za-km-z]{32,44})(?:[?&#/]|$)', re.IGNORECASE)
             ]
 
         if self.urgent_keywords is None:
@@ -290,8 +306,6 @@ class Settings:
         if self.ai.use_ai_confirmation and not self.ai.openai_api_key:
             logger.warning("⚠️ AI подтверждение отключено - нет OPENAI_API_KEY")
             self.ai.use_ai_confirmation = False
-
-        
 
         if self.trading.trade_amount_sol <= 0:
             errors.append("TRADE_AMOUNT_SOL должен быть положительным")
