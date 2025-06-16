@@ -522,25 +522,43 @@ class UltraFastJupiterTrader:
     async def health_check(self) -> Dict:
         """Проверка здоровья торговой системы"""
         try:
-            # Проверяем соединение с Solana
-            response = await self.solana_client.get_health()
-            solana_healthy = response.value == "ok"
+            # Проверяем соединение с Solana (используем get_version вместо get_health)
+            try:
+                response = await self.solana_client.get_version()
+                solana_healthy = response.value is not None
+            except Exception as e:
+                logger.error(f"❌ Ошибка подключения к Solana RPC: {e}")
+                solana_healthy = False
 
             # Проверяем Jupiter API
-            async with self.session.get(
-                    f"{settings.jupiter.api_url}/quote?inputMint=So11111111111111111111111111111111111111112&outputMint=EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v&amount=1000000&slippageBps=50") as resp:
-                jupiter_healthy = resp.status == 200
+            try:
+                async with self.session.get(
+                        f"{settings.jupiter.api_url}/quote?inputMint=So11111111111111111111111111111111111111112&outputMint=EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v&amount=1000000&slippageBps=50") as resp:
+                    jupiter_healthy = resp.status == 200
+            except Exception as e:
+                logger.error(f"❌ Ошибка подключения к Jupiter API: {e}")
+                jupiter_healthy = False
 
             # Проверяем баланс кошелька
-            sol_balance = await self.get_sol_balance()
+            try:
+                sol_balance = await self.get_sol_balance()
+            except Exception as e:
+                logger.error(f"❌ Ошибка получения баланса: {e}")
+                sol_balance = 0.0
 
             status = "healthy" if solana_healthy and jupiter_healthy else "degraded"
+
+            # Логируем детали для отладки
+            if not solana_healthy:
+                logger.warning("⚠️ Solana RPC недоступен")
+            if not jupiter_healthy:
+                logger.warning("⚠️ Jupiter API недоступен")
 
             return {
                 "status": status,
                 "solana_rpc": "healthy" if solana_healthy else "error",
                 "jupiter_api": "healthy" if jupiter_healthy else "error",
-                "wallet_address": str(self.wallet_keypair.pubkey()),
+                "wallet_address": str(self.wallet_keypair.pubkey()) if self.wallet_keypair else "unknown",
                 "sol_balance": sol_balance,
                 "stats": {
                     "total_trades": self.total_trades,
@@ -553,6 +571,7 @@ class UltraFastJupiterTrader:
             }
 
         except Exception as e:
+            logger.error(f"❌ Ошибка health check: {e}")
             return {"status": "error", "message": str(e)}
 
 

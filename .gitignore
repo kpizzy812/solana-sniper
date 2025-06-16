@@ -1,6 +1,16 @@
 # Environment
 .env
 *.env
+.env.*
+
+# КРИТИЧНО: Приватные ключи и seed phrases
+*private_key*
+*seed_phrase*
+*mnemonic*
+get_key.py
+extract_key.py
+wallet_key.py
+keypair.json
 
 # Python
 __pycache__/
@@ -36,3 +46,7 @@ Thumbs.db
 # Project specific
 test_wallets/
 backup/
+
+# Solana
+~/.config/solana/
+id.json

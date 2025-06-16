@@ -4,7 +4,7 @@
 Ultra-fast social media monitoring and trading system
 
 Features:
-- 1-second monitoring of Telegram, Discord, Twitter, websites
+- 1-second monitoring of Telegram, Twitter, websites
 - Instant regex + optional AI analysis
 - Concurrent Jupiter trading (10 purchases simultaneously)
 - Security checks and risk management
@@ -129,17 +129,37 @@ class MoriSniperBot:
             raise Exception("Trading system initialization failed")
 
         # Initialize Telegram monitor
-        telegram_monitor.trading_callback = self.handle_trading_signal
-        if await telegram_monitor.start():
-            logger.success("✅ Telegram Monitor ready")
-            self.monitors['telegram'] = telegram_monitor
+        if settings.monitoring.telegram_bot_token:
+            telegram_monitor.trading_callback = self.handle_trading_signal
+            if await telegram_monitor.start():
+                logger.success("✅ Telegram Monitor ready")
+                self.monitors['telegram'] = telegram_monitor
+            else:
+                logger.warning("⚠️ Telegram Monitor not available")
         else:
-            logger.warning("⚠️ Telegram Monitor not available")
+            logger.info("⏭️ Telegram token not configured, skipping Telegram monitor")
 
-        # TODO: Initialize other monitors (Discord, Twitter, Website)
-        # if await discord_monitor.start():
-        #     logger.success("✅ Discord Monitor ready")
-        #     self.monitors['discord'] = discord_monitor
+        # Initialize Twitter monitor
+        if settings.monitoring.twitter_bearer_token:
+            twitter_monitor.trading_callback = self.handle_trading_signal
+            if await twitter_monitor.start():
+                logger.success("✅ Twitter Monitor ready")
+                self.monitors['twitter'] = twitter_monitor
+            else:
+                logger.warning("⚠️ Twitter Monitor not available")
+        else:
+            logger.info("⏭️ Twitter token not configured, skipping Twitter monitor")
+
+        # Initialize Website monitor
+        if settings.monitoring.website_urls and any(settings.monitoring.website_urls):
+            website_monitor.trading_callback = self.handle_trading_signal
+            if await website_monitor.start():
+                logger.success("✅ Website Monitor ready")
+                self.monitors['website'] = website_monitor
+            else:
+                logger.warning("⚠️ Website Monitor not available")
+        else:
+            logger.info("⏭️ Website URLs not configured, skipping Website monitor")
 
         logger.success(f"✅ {len(self.monitors)} monitors initialized")
 

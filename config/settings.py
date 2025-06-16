@@ -3,16 +3,80 @@ import re
 from typing import List, Dict, Optional
 from dataclasses import dataclass
 from dotenv import load_dotenv
+from loguru import logger
 
 load_dotenv()
+
+# Импорты для конвертации seed phrase
+try:
+    from mnemonic import Mnemonic
+    from solders.keypair import Keypair
+    import base58
+
+    CRYPTO_LIBS_AVAILABLE = True
+except ImportError:
+    CRYPTO_LIBS_AVAILABLE = False
+    logger.warning("⚠️ Библиотеки для seed phrase не установлены. Используйте: pip install mnemonic")
+
+
+def convert_seed_to_private_key(seed_phrase: str) -> str:
+    """Конвертирует seed phrase в base58 приватный ключ"""
+    if not CRYPTO_LIBS_AVAILABLE:
+        raise ImportError("Установите: pip install mnemonic solders")
+
+    try:
+        mnemo = Mnemonic("english")
+        clean_phrase = seed_phrase.strip()
+
+        if not mnemo.check(clean_phrase):
+            raise ValueError("Неверная seed phrase")
+
+        seed = mnemo.to_seed(clean_phrase)
+        keypair = Keypair.from_seed(seed[:32])
+        private_key = base58.b58encode(bytes(keypair)).decode('utf-8')
+
+        logger.info(f"✅ Приватный ключ сгенерирован из seed phrase")
+        logger.info(f"🏦 Адрес кошелька: {keypair.pubkey()}")
+
+        return private_key
+    except Exception as e:
+        raise ValueError(f"Ошибка конвертации seed phrase: {e}")
 
 
 @dataclass
 class SolanaConfig:
     rpc_url: str = os.getenv('SOLANA_RPC_URL', 'https://api.devnet.solana.com')
     network: str = 'devnet'  # devnet для тестов, mainnet-beta для продакшена
-    private_key: str = os.getenv('SOLANA_PRIVATE_KEY', '')
+    private_key: str = ''
     commitment: str = 'confirmed'
+
+    def __post_init__(self):
+        """Автоматическая конвертация seed phrase в private key"""
+        # Сначала пробуем получить готовый приватный ключ
+        direct_key = os.getenv('SOLANA_PRIVATE_KEY', '')
+
+        if direct_key:
+            self.private_key = direct_key
+            logger.debug("🔑 Используется готовый приватный ключ")
+        else:
+            # Если нет готового ключа, конвертируем из seed phrase
+            seed_phrase = os.getenv('SOLANA_SEED_PHRASE', '')
+
+            if seed_phrase:
+                try:
+                    self.private_key = convert_seed_to_private_key(seed_phrase)
+                    logger.success("🔄 Seed phrase сконвертирована в приватный ключ")
+                except Exception as e:
+                    logger.error(f"❌ Ошибка конвертации seed phrase: {e}")
+                    raise
+            else:
+                logger.error("❌ Не найден ни SOLANA_PRIVATE_KEY, ни SOLANA_SEED_PHRASE")
+
+        # Определяем сеть из RPC URL
+        if 'mainnet' in self.rpc_url:
+            self.network = 'mainnet-beta'
+        elif 'devnet' in self.rpc_url:
+            self.network = 'devnet'
 
 
 @dataclass
@@ -73,8 +137,8 @@ class MonitoringConfig:
     def __post_init__(self):
         if self.telegram_channels is None:
             self.telegram_channels = [
-                os.getenv('TELEGRAM_CHANNEL_1', '@ProfessorMoriarty'),
-                os.getenv('TELEGRAM_CHANNEL_2', '@MoriForum')
+                os.getenv('TELEGRAM_CHANNEL_1', ''),
+                os.getenv('TELEGRAM_CHANNEL_2', '')
             ]
 
         if self.telegram_groups is None:
@@ -85,20 +149,20 @@ class MonitoringConfig:
 
         if self.telegram_admin_usernames is None:
             self.telegram_admin_usernames = [
-                os.getenv('TELEGRAM_ADMIN_1', 'ProfessorMoriarty'),
-                os.getenv('TELEGRAM_ADMIN_2', 'MoriAdmin')
+                os.getenv('TELEGRAM_ADMIN_1', ''),
+                os.getenv('TELEGRAM_ADMIN_2', '')
             ]
 
         if self.twitter_usernames is None:
             self.twitter_usernames = [
-                os.getenv('TWITTER_USERNAME_1', 'ProfessorMoriarty'),
-                os.getenv('TWITTER_USERNAME_2', 'MoriToken')
+                os.getenv('TWITTER_USERNAME_1', ''),
+                os.getenv('TWITTER_USERNAME_2', '')
             ]
 
         if self.website_urls is None:
             self.website_urls = [
-                os.getenv('WEBSITE_URL_1', 'https://moritoken.com'),
-                os.getenv('WEBSITE_URL_2', 'https://professor-moriarty.net')
+                os.getenv('WEBSITE_URL_1', ''),
+                os.getenv('WEBSITE_URL_2', '')
             ]
 
         if self.website_selectors is None:
@@ -121,7 +185,7 @@ class AIConfig:
 
     # Оптимизация скорости
     use_fast_analysis: bool = True  # Использовать regex в первую очередь
-    use_ai_confirmation: bool = True  # AI анализ в фоне
+    use_ai_confirmation: bool = False  # AI анализ в фоне
     ai_timeout: float = 3.0  # Максимальное время для AI анализа
     cache_ai_results: bool = True
 
@@ -214,17 +278,20 @@ class Settings:
         errors = []
 
         if not self.solana.private_key:
-            errors.append("SOLANA_PRIVATE_KEY обязателен")
+            errors.append("Нужен SOLANA_PRIVATE_KEY или SOLANA_SEED_PHRASE")
 
         if not any([
             self.monitoring.telegram_bot_token,
             self.monitoring.twitter_bearer_token,
-            self.monitoring.website_urls
+            any(self.monitoring.website_urls)
         ]):
             errors.append("Нужен хотя бы один токен API соцсетей или URL сайта")
 
         if self.ai.use_ai_confirmation and not self.ai.openai_api_key:
-            errors.append("OPENAI_API_KEY нужен когда включено AI подтверждение")
+            logger.warning("⚠️ AI подтверждение отключено - нет OPENAI_API_KEY")
+            self.ai.use_ai_confirmation = False
+
+        
 
         if self.trading.trade_amount_sol <= 0:
             errors.append("TRADE_AMOUNT_SOL должен быть положительным")
@@ -298,7 +365,7 @@ def is_admin_message(username: str, user_id: int = None) -> bool:
         return False
 
     # Проверяем по имени пользователя
-    admin_usernames = [admin.lower() for admin in settings.monitoring.telegram_admin_usernames]
+    admin_usernames = [admin.lower() for admin in settings.monitoring.telegram_admin_usernames if admin]
     return username.lower() in admin_usernames
 
 
