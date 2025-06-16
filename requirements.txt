@@ -1,0 +1,58 @@
+# Core async framework
+asyncio
+aiohttp==3.9.1
+aiofiles==23.2.1
+
+# Solana blockchain
+solana==0.34.0
+solders==0.21.0
+anchorpy==0.19.1
+
+# Social media APIs
+python-telegram-bot==20.7
+discord.py==2.3.2
+tweepy==4.14.0
+beautifulsoup4==4.12.2
+selenium==4.16.2
+
+# AI and analysis
+openai==1.6.1
+tiktoken==0.5.2
+
+# Web scraping and requests
+requests==2.31.0
+httpx==0.25.2
+lxml==4.9.4
+
+# Database
+aiosqlite==0.19.0
+sqlalchemy==2.0.23
+
+# Jupiter DEX API
+aiohttp[speedups]==3.9.1
+
+# Utilities
+python-dotenv==1.0.0
+pydantic==2.5.2
+loguru==0.7.2
+tenacity==8.2.3
+
+# Performance monitoring
+psutil==5.9.6
+uvloop==0.19.0  # Faster event loop for Linux/Mac
+
+# Image processing (for media analysis)
+Pillow==10.1.0
+
+# Rate limiting
+aiolimiter==1.1.0
+
+# Configuration
+pyyaml==6.0.1
+toml==0.10.2
+
+# Development tools
+pytest==7.4.3
+pytest-asyncio==0.21.1
+black==23.11.0
+isort==5.12.0
