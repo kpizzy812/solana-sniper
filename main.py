@@ -29,6 +29,8 @@ from loguru import logger
 from config.settings import settings
 from ai.analyzer import analyzer
 from monitors.telegram import telegram_monitor
+from monitors.twitter import twitter_monitor
+from monitors.website import website_monitor
 from trading.jupiter import jupiter_trader
 
 
