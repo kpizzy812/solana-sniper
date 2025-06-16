@@ -215,14 +215,37 @@ class HighSpeedTelegramMonitor:
     def is_monitored_chat(self, chat) -> bool:
         """Проверка, отслеживается ли чат"""
         chat_identifier = f"@{chat.username}" if chat.username else str(chat.id)
-        return chat_identifier in self.monitored_chats
+        is_monitored = chat_identifier in self.monitored_chats
+
+        # ОТЛАДКА: Логируем все проверки
+        logger.debug(f"🔍 Проверка чата: {chat_identifier} (ID: {chat.id}) | "
+                     f"Мониторится: {is_monitored} | "
+                     f"Тип: {chat.type} | "
+                     f"Название: {getattr(chat, 'title', 'N/A')}")
+
+        return is_monitored
 
     async def handle_message(self, update: Update, context: CallbackContext):
         """Обработка новых сообщений через handler"""
-        if update.message and self.is_monitored_chat(update.message.chat):
-            await self.handle_message_direct(update.message, is_edit=False)
-        elif update.edited_message and self.is_monitored_chat(update.edited_message.chat):
-            await self.handle_message_direct(update.edited_message, is_edit=True)
+        # ОТЛАДКА: Логируем все входящие сообщения
+        if update.message:
+            chat = update.message.chat
+            logger.info(f"🔔 НОВОЕ СООБЩЕНИЕ: Чат {chat.id} (@{chat.username}) | "
+                        f"Тип: {chat.type} | "
+                        f"Текст: {(update.message.text or update.message.caption or 'медиа')[:100]}")
+
+            if self.is_monitored_chat(chat):
+                logger.info(f"✅ Обрабатываем сообщение из отслеживаемого чата")
+                await self.handle_message_direct(update.message, is_edit=False)
+            else:
+                logger.warning(f"⏭️ Пропускаем сообщение из неотслеживаемого чата")
+
+        elif update.edited_message:
+            chat = update.edited_message.chat
+            logger.info(f"✏️ РЕДАКТИРОВАНИЕ: Чат {chat.id} (@{chat.username})")
+
+            if self.is_monitored_chat(chat):
+                await self.handle_message_direct(update.edited_message, is_edit=True)
 
     async def handle_message_direct(self, message, is_edit: bool = False):
         """Прямая обработка сообщения"""
@@ -234,18 +257,70 @@ class HighSpeedTelegramMonitor:
 
             # Пропускаем уже обработанные
             if message_key in self.processed_messages:
+                logger.debug(f"⏭️ Сообщение уже обработано: {message_key}")
                 return
 
-            # Проверяем, является ли отправитель админом (только для групп)
+            logger.info(f"🔥 ОБРАБОТКА СООБЩЕНИЯ: {message_key}")
+
+            # ИСПРАВЛЕНО: Правильная логика для разных типов чатов
             is_admin_msg = False
-            if message.chat.type in ['group', 'supergroup']:
-                is_admin_msg = await self.check_if_admin_message(message)
-                if not is_admin_msg:
-                    logger.debug(f"📱 Пропускаем сообщение не от админа в {message.chat.title or message.chat.id}")
-                    self.stats['regular_messages'] += 1
-                    return
+            should_process = True
+
+            # КАНАЛЫ: Всегда обрабатываем все сообщения
+            if message.chat.type == 'channel':
+                is_admin_msg = True
+                should_process = True
+
+                # В каналах сообщения могут быть от канала или от конкретного пользователя
+                if message.sender_chat:
+                    logger.info(f"📺 КАНАЛ: Сообщение от имени канала '{message.sender_chat.title}'")
+                elif message.from_user:
+                    logger.info(f"📺 КАНАЛ: Сообщение от пользователя @{message.from_user.username or 'unknown'}")
                 else:
+                    logger.info(f"📺 КАНАЛ: Анонимное сообщение")
+
+            # СУПЕРГРУППЫ/ГРУППЫ: Проверяем админов или обрабатываем все для отладки
+            elif message.chat.type in ['group', 'supergroup']:
+                # Сначала проверяем, является ли сообщение от имени чата (анонимный админ)
+                if message.sender_chat:
+                    is_admin_msg = True
+                    should_process = True
+                    logger.info(f"👥 ГРУППА: Анонимное сообщение от админа (от имени '{message.sender_chat.title}')")
                     self.stats['admin_messages'] += 1
+
+                # Затем проверяем обычных пользователей
+                elif message.from_user:
+                    is_admin_msg = await self.check_if_admin_message(message)
+
+                    if is_admin_msg:
+                        logger.info(f"👑 ГРУППА: Сообщение от АДМИНА @{message.from_user.username or 'unknown'}")
+                        self.stats['admin_messages'] += 1
+                        should_process = True
+                    else:
+                        # ДЛЯ ОТЛАДКИ: Временно обрабатываем все сообщения
+                        logger.warning(
+                            f"👤 ГРУППА: Сообщение от обычного пользователя @{message.from_user.username or 'unknown'}")
+                        logger.warning(f"🔧 ОТЛАДКА: Обрабатываем и это сообщение")
+                        self.stats['regular_messages'] += 1
+                        should_process = True  # Временно для отладки
+
+                        # В продакшене раскомментируйте:
+                        # should_process = False
+                        # logger.info(f"⏭️ Пропускаем - не админ")
+                        # return
+                else:
+                    logger.warning(f"👥 ГРУППА: Сообщение без отправителя")
+                    should_process = False
+
+            # ПРИВАТНЫЕ ЧАТЫ: Всегда обрабатываем
+            else:
+                is_admin_msg = True
+                should_process = True
+                logger.info(f"👤 ПРИВАТНЫЙ ЧАТ: Обрабатываем")
+
+            if not should_process:
+                logger.warning(f"⏭️ Пропускаем сообщение")
+                return
 
             # Проверяем топики
             thread_id = None
@@ -255,6 +330,8 @@ class HighSpeedTelegramMonitor:
 
             # Извлекаем данные поста
             post = await self.extract_post_data(message, is_edit, is_admin_msg, thread_id)
+
+            logger.info(f"📝 КОНТЕНТ ДЛЯ АНАЛИЗА: {post.content[:200]}...")
 
             # Быстрый анализ
             analysis_result = await analyzer.analyze_post(
@@ -266,16 +343,20 @@ class HighSpeedTelegramMonitor:
 
             processing_time = (time.time() - start_time) * 1000
 
-            logger.info(f"📱 Telegram сообщение ({processing_time:.1f}ms): "
+            logger.info(f"📱 Telegram анализ ({processing_time:.1f}ms): "
                         f"контракт={analysis_result.has_contract} | "
-                        f"уверенность={analysis_result.confidence:.2f}")
+                        f"уверенность={analysis_result.confidence:.2f} | "
+                        f"адреса={analysis_result.addresses}")
 
             # Если обнаружен контракт с высокой уверенностью
             if analysis_result.has_contract and analysis_result.confidence > 0.6:
                 logger.critical(f"🚨 КОНТРАКТ ОБНАРУЖЕН: {analysis_result.addresses}")
 
                 if self.trading_callback:
+                    logger.info(f"🎯 Запускаем торговлю...")
                     asyncio.create_task(self.trigger_trading(analysis_result, post))
+                else:
+                    logger.warning(f"⚠️ Торговый callback не настроен!")
 
                 self.stats['contracts_found'] += 1
 
@@ -291,6 +372,8 @@ class HighSpeedTelegramMonitor:
 
         except Exception as e:
             logger.error(f"❌ Ошибка обработки Telegram сообщения: {e}")
+            import traceback
+            logger.error(f"Полная ошибка: {traceback.format_exc()}")
             self.stats['errors'] += 1
 
     async def check_if_admin_message(self, message) -> bool:
@@ -300,28 +383,45 @@ class HighSpeedTelegramMonitor:
             if message.chat.type == 'channel':
                 return True
 
+            # Если сообщение от имени чата (анонимный админ) - считаем админским
+            if message.sender_chat:
+                logger.info(f"✅ Анонимное сообщение от имени чата '{message.sender_chat.title}' - админское")
+                return True
+
             # Для групп - проверяем статус отправителя
             if message.from_user:
-                # Проверяем по username
                 username = message.from_user.username
+                user_id = message.from_user.id
+
+                logger.debug(f"🔍 Проверяем админа: @{username} (ID: {user_id})")
+
+                # Проверяем по username в настройках
                 if username:
                     from config.settings import is_admin_message
-                    if is_admin_message(username, message.from_user.id):
+                    if is_admin_message(username, user_id):
+                        logger.info(f"✅ Найден в списке админов настроек: @{username}")
                         return True
 
                 # Проверяем статус в чате (с защитой от ошибок)
                 try:
-                    member = await self.bot.get_chat_member(message.chat.id, message.from_user.id)
+                    member = await self.bot.get_chat_member(message.chat.id, user_id)
                     if member.status in ['creator', 'administrator']:
-                        logger.info(f"✅ Админ сообщение от @{username or 'unknown'} ({member.status})")
+                        logger.info(f"✅ Админ чата: @{username or 'unknown'} ({member.status})")
                         return True
+                    else:
+                        logger.debug(f"❌ Обычный пользователь: @{username or 'unknown'} ({member.status})")
+                        return False
                 except Exception as e:
-                    logger.debug(f"Не удалось проверить статус в чате: {e}")
+                    logger.debug(f"⚠️ Не удалось проверить статус в чате: {e}")
+                    # Если не можем проверить статус, но пользователь в списке админов - считаем админом
+                    if username:
+                        from config.settings import is_admin_message
+                        return is_admin_message(username, user_id)
 
             return False
 
         except Exception as e:
-            logger.debug(f"Ошибка проверки админа: {e}")
+            logger.debug(f"❌ Ошибка проверки админа: {e}")
             return False
 
     async def extract_post_data(self, message, is_edit: bool, is_admin: bool, thread_id: Optional[int]) -> TelegramPost:
@@ -339,12 +439,12 @@ class HighSpeedTelegramMonitor:
                         # Прямая ссылка в тексте
                         url_text = content[entity.offset:entity.offset + entity.length]
                         full_content += f" {url_text}"
-                        logger.debug(f"📎 Найдена URL в тексте: {url_text}")
+                        logger.info(f"📎 Найдена URL в тексте: {url_text}")
                     elif entity.type == 'text_link':
                         # Гиперссылка с текстом
                         url_text = entity.url
                         full_content += f" {url_text}"
-                        logger.debug(f"📎 Найдена гиперссылка: {url_text}")
+                        logger.info(f"📎 Найдена гиперссылка: {url_text}")
 
         # Также проверяем caption entities для медиа
         if message.caption_entities:
@@ -353,27 +453,44 @@ class HighSpeedTelegramMonitor:
                     if entity.type == 'url':
                         url_text = (message.caption or "")[entity.offset:entity.offset + entity.length]
                         full_content += f" {url_text}"
-                        logger.debug(f"📎 Найдена URL в caption: {url_text}")
+                        logger.info(f"📎 Найдена URL в caption: {url_text}")
                     elif entity.type == 'text_link':
                         url_text = entity.url
                         full_content += f" {url_text}"
-                        logger.debug(f"📎 Найдена гиперссылка в caption: {url_text}")
+                        logger.info(f"📎 Найдена гиперссылка в caption: {url_text}")
 
         # Логируем полный контент для отладки
-        logger.debug(f"📝 Полный контент сообщения: {full_content}")
+        logger.info(f"📝 Полный контент сообщения: {full_content}")
 
-        # Получаем информацию об авторе
+        # ИСПРАВЛЕНО: Правильное определение автора
         author = "Unknown"
-        if message.from_user:
-            author = message.from_user.username or f"{message.from_user.first_name}"
-        elif message.sender_chat:
-            author = message.sender_chat.title or "Channel"
+
+        # Сначала проверяем, от имени чата ли сообщение (анонимный админ)
+        if message.sender_chat:
+            author = f"{message.sender_chat.title} (Channel)" if message.sender_chat.title else "Channel"
+            logger.info(f"👤 Автор: {author} (анонимный админ)")
+
+        # Затем проверяем обычного пользователя
+        elif message.from_user:
+            if message.from_user.username:
+                author = f"@{message.from_user.username}"
+            else:
+                author = message.from_user.first_name or "Unknown User"
+            logger.info(f"👤 Автор: {author}")
+
+        # Последний вариант - если ничего не найдено
+        else:
+            author = f"Anonymous ({message.chat.title or 'Unknown Chat'})"
+            logger.info(f"👤 Автор: {author}")
 
         # Генерируем URL сообщения
         chat_username = message.chat.username
         url = ""
         if chat_username:
             url = f"https://t.me/{chat_username}/{message.message_id}"
+        elif message.chat.type == 'channel':
+            # Для приватных каналов генерируем ссылку с ID
+            url = f"https://t.me/c/{abs(message.chat.id)}/{message.message_id}"
 
         # Извлекаем URL медиа (с защитой от ошибок)
         media_urls = []

@@ -356,16 +356,87 @@ def extract_addresses_fast(text: str) -> List[str]:
     """Ультра-быстрое извлечение адресов через regex"""
     addresses = set()
 
-    for pattern in settings.ai.solana_address_patterns:
-        matches = pattern.findall(text)
-        for match in matches:
-            # Обрабатываем результаты tuple из групп
-            addr = match if isinstance(match, str) else match[0] if match else ''
-            if addr and is_valid_solana_address(addr):
-                addresses.add(addr)
+    # ОТЛАДКА: Логируем входной текст
+    logger.debug(f"🔍 Анализируем текст: {text}")
 
-    return list(addresses)
+    # Получаем паттерны - исправляем потенциальную ошибку
+    try:
+        patterns = settings.ai.solana_address_patterns
+        if not patterns:
+            logger.warning("⚠️ Паттерны адресов не инициализированы")
+            return []
+    except AttributeError:
+        logger.error("❌ Ошибка доступа к паттернам адресов")
+        return []
 
+    for i, pattern in enumerate(patterns):
+        try:
+            matches = pattern.findall(text)
+            if matches:
+                logger.debug(f"✅ Паттерн {i} нашел совпадения: {matches}")
+
+            for match in matches:
+                # Обрабатываем результаты tuple из групп
+                addr = match if isinstance(match, str) else match[0] if match else ''
+
+                if addr:
+                    logger.debug(f"🔍 Проверяем адрес: {addr}")
+                    if is_valid_solana_address(addr):
+                        logger.info(f"✅ ВАЛИДНЫЙ АДРЕС НАЙДЕН: {addr}")
+                        addresses.add(addr)
+                    else:
+                        logger.debug(f"❌ Невалидный адрес: {addr}")
+        except Exception as e:
+            logger.error(f"❌ Ошибка в паттерне {i}: {e}")
+
+    result = list(addresses)
+    logger.info(f"🎯 ИТОГО НАЙДЕНО АДРЕСОВ: {len(result)} | {result}")
+    return result
+
+
+# Также добавим принудительную инициализацию паттернов
+def ensure_patterns_initialized():
+    """Принудительная инициализация паттернов"""
+    if not hasattr(settings.ai, '_solana_address_patterns') or not settings.ai._solana_address_patterns:
+        logger.info("🔧 Инициализируем паттерны адресов...")
+
+        settings.ai._solana_address_patterns = [
+            # Основной паттерн Solana адресов
+            re.compile(r'\b[1-9A-HJ-NP-Za-km-z]{32,44}\b'),
+
+            # Паттерны с ключевыми словами
+            re.compile(r'contract[:\s]*([1-9A-HJ-NP-Za-km-z]{32,44})', re.IGNORECASE),
+            re.compile(r'mint[:\s]*([1-9A-HJ-NP-Za-km-z]{32,44})', re.IGNORECASE),
+            re.compile(r'address[:\s]*([1-9A-HJ-NP-Za-km-z]{32,44})', re.IGNORECASE),
+            re.compile(r'ca[:\s]*([1-9A-HJ-NP-Za-km-z]{32,44})', re.IGNORECASE),
+            re.compile(r'токен[:\s]*([1-9A-HJ-NP-Za-km-z]{32,44})', re.IGNORECASE),
+            re.compile(r'контракт[:\s]*([1-9A-HJ-NP-Za-km-z]{32,44})', re.IGNORECASE),
+
+            # Jupiter паттерны (улучшенные)
+            re.compile(r'jup\.ag/swap/[^-]*-([1-9A-HJ-NP-Za-km-z]{32,44})', re.IGNORECASE),
+            re.compile(r'jup\.ag.*?([1-9A-HJ-NP-Za-km-z]{32,44})', re.IGNORECASE),
+
+            # Другие DEX паттерны
+            re.compile(r'raydium\.io/.*?([1-9A-HJ-NP-Za-km-z]{32,44})', re.IGNORECASE),
+            re.compile(r'dexscreener\.com/solana/([1-9A-HJ-NP-Za-km-z]{32,44})', re.IGNORECASE),
+            re.compile(r'birdeye\.so/token/([1-9A-HJ-NP-Za-km-z]{32,44})', re.IGNORECASE),
+
+            # URL параметры
+            re.compile(r'[?&]token=([1-9A-HJ-NP-Za-km-z]{32,44})', re.IGNORECASE),
+            re.compile(r'[?&]mint=([1-9A-HJ-NP-Za-km-z]{32,44})', re.IGNORECASE),
+            re.compile(r'[?&]address=([1-9A-HJ-NP-Za-km-z]{32,44})', re.IGNORECASE),
+
+            # Разделенные дефисом адреса
+            re.compile(r'[/-]([1-9A-HJ-NP-Za-km-z]{32,44})(?:[?&#/\s]|$)', re.IGNORECASE),
+
+            # Специальный паттерн для точного извлечения из Jupiter ссылок
+            re.compile(r'So11111111111111111111111111111111111111112-([1-9A-HJ-NP-Za-km-z]{32,44})', re.IGNORECASE),
+        ]
+
+        logger.success(f"✅ Инициализировано {len(settings.ai._solana_address_patterns)} паттернов")
+
+# Вызываем инициализацию при импорте
+ensure_patterns_initialized()
 
 def has_urgent_keywords(text: str) -> bool:
     """Быстрое обнаружение ключевых слов"""
