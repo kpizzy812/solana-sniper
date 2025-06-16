@@ -7,12 +7,15 @@ from decimal import Decimal
 
 import aiohttp
 from solana.rpc.async_api import AsyncClient
-from solana.transaction import Transaction
 from solana.rpc.commitment import Confirmed
+from solana.rpc.types import TxOpts
 from solders.keypair import Keypair
 from solders.pubkey import Pubkey
 from solders.transaction import VersionedTransaction
+from solders.system_program import TransferParams, transfer
+from solders.compute_budget import set_compute_unit_limit, set_compute_unit_price
 import base64
+import base58
 from loguru import logger
 
 from config.settings import settings
@@ -20,7 +23,7 @@ from config.settings import settings
 
 @dataclass
 class TradeResult:
-    """Result of a single trade attempt"""
+    """Результат отдельной сделки"""
     success: bool
     signature: Optional[str]
     error: Optional[str]
@@ -29,113 +32,169 @@ class TradeResult:
     price_impact: Optional[float]
     execution_time_ms: float
     trade_index: int
+    gas_used: Optional[int] = None
 
 
 @dataclass
 class QuoteResponse:
-    """Jupiter quote response"""
+    """Ответ от Jupiter API с котировкой"""
     input_mint: str
     output_mint: str
     in_amount: str
     out_amount: str
     price_impact_pct: str
     route_plan: List[Dict]
+    other_amount_threshold: Optional[str] = None
+    swap_mode: Optional[str] = None
 
 
-class HighSpeedJupiterTrader:
-    """Ultra-fast Jupiter trading system"""
+@dataclass
+class PoolInfo:
+    """Информация о ликвидности пула"""
+    liquidity_sol: float
+    price: float
+    market_cap: float
+    volume_24h: float
+    holders_count: int
+
+
+class UltraFastJupiterTrader:
+    """Ультра-быстрая торговая система Jupiter"""
 
     def __init__(self):
         self.solana_client: Optional[AsyncClient] = None
         self.session: Optional[aiohttp.ClientSession] = None
         self.wallet_keypair: Optional[Keypair] = None
 
-        # Trading stats
+        # Статистика торговли
         self.total_trades = 0
         self.successful_trades = 0
         self.failed_trades = 0
+        self.total_sol_spent = 0.0
+        self.total_tokens_bought = 0.0
+
+        # Кэш для быстрого доступа
+        self.quote_cache = {}
+        self.pool_cache = {}
 
         self.setup_wallet()
 
     def setup_wallet(self):
-        """Setup Solana wallet from private key"""
+        """Настройка кошелька из приватного ключа"""
         try:
             if settings.solana.private_key:
-                # Decode base58 private key
-                import base58
+                # Декодируем base58 приватный ключ
                 private_key_bytes = base58.b58decode(settings.solana.private_key)
                 self.wallet_keypair = Keypair.from_bytes(private_key_bytes)
-                logger.info(f"Wallet loaded: {self.wallet_keypair.pubkey()}")
+                logger.info(f"💰 Кошелек загружен: {self.wallet_keypair.pubkey()}")
             else:
-                logger.error("No private key configured")
+                logger.error("❌ Приватный ключ не настроен")
         except Exception as e:
-            logger.error(f"Failed to setup wallet: {e}")
+            logger.error(f"❌ Ошибка настройки кошелька: {e}")
 
     async def start(self):
-        """Initialize trading system"""
+        """Инициализация торговой системы"""
         try:
-            # Setup Solana RPC client
+            # Настройка Solana RPC клиента
             self.solana_client = AsyncClient(
                 endpoint=settings.solana.rpc_url,
                 commitment=Confirmed
             )
 
-            # Setup HTTP session for Jupiter API
+            # Настройка HTTP сессии для Jupiter API
             timeout = aiohttp.ClientTimeout(total=settings.jupiter.timeout)
-            self.session = aiohttp.ClientSession(timeout=timeout)
+            connector = aiohttp.TCPConnector(
+                limit=settings.jupiter.max_concurrent_requests,
+                limit_per_host=settings.jupiter.max_concurrent_requests
+            )
+            self.session = aiohttp.ClientSession(
+                timeout=timeout,
+                connector=connector
+            )
 
-            # Test connections
-            await self.health_check()
+            # Тестируем соединения
+            health = await self.health_check()
+            if health['status'] != 'healthy':
+                raise Exception(f"Проблемы с подключением: {health}")
 
-            logger.info("Jupiter trader initialized successfully")
+            logger.success("✅ Jupiter трейдер инициализирован успешно")
             return True
 
         except Exception as e:
-            logger.error(f"Failed to start Jupiter trader: {e}")
+            logger.error(f"❌ Ошибка запуска Jupiter трейдера: {e}")
             return False
 
     async def stop(self):
-        """Cleanup resources"""
+        """Остановка и очистка ресурсов"""
         if self.session:
             await self.session.close()
         if self.solana_client:
             await self.solana_client.close()
-        logger.info("Jupiter trader stopped")
+        logger.info("🛑 Jupiter трейдер остановлен")
 
     async def execute_sniper_trades(self, token_address: str, source_info: Dict) -> List[TradeResult]:
         """
-        Execute multiple simultaneous trades for sniping
+        Выполнение снайперских сделок
+        Поддерживает как одну покупку, так и множественные
         """
-        logger.critical(f"🎯 SNIPING TOKEN: {token_address}")
-        logger.info(
-            f"Executing {settings.trading.num_purchases} trades of {settings.trading.trade_amount_sol} SOL each")
+        logger.critical(f"🎯 СНАЙПЕР АТАКА НА ТОКЕН: {token_address}")
+
+        # Определяем стратегию покупки
+        num_trades = settings.trading.num_purchases
+        amount_per_trade = settings.trading.trade_amount_sol
+
+        # Проверяем настройки для умного распределения
+        if settings.trading.smart_split and num_trades > 1:
+            # Умное распределение размеров для уменьшения проскальзывания
+            amounts = self.calculate_smart_amounts(
+                total_amount=num_trades * amount_per_trade,
+                num_trades=num_trades
+            )
+        else:
+            amounts = [amount_per_trade] * num_trades
+
+        logger.info(f"📊 Выполняется {num_trades} сделок с размерами: {amounts}")
 
         start_time = time.time()
 
-        # Create trade tasks for concurrent execution
-        trade_tasks = []
-        for i in range(settings.trading.num_purchases):
-            task = asyncio.create_task(
-                self.execute_single_trade(token_address, i, source_info)
-            )
-            trade_tasks.append(task)
+        # Предварительная проверка безопасности токена
+        if not await self.security_check(token_address):
+            logger.error("❌ Токен не прошел проверку безопасности")
+            return []
 
-        # Execute all trades simultaneously
-        results = await asyncio.gather(*trade_tasks, return_exceptions=True)
+        # Создаем задачи для параллельного выполнения
+        if settings.trading.concurrent_trades:
+            # Параллельное выполнение всех сделок
+            trade_tasks = []
+            for i in range(num_trades):
+                task = asyncio.create_task(
+                    self.execute_single_trade(token_address, i, amounts[i], source_info)
+                )
+                trade_tasks.append(task)
 
-        # Process results
+            # Выполняем все сделки одновременно
+            results = await asyncio.gather(*trade_tasks, return_exceptions=True)
+        else:
+            # Последовательное выполнение
+            results = []
+            for i in range(num_trades):
+                result = await self.execute_single_trade(token_address, i, amounts[i], source_info)
+                results.append(result)
+
+        # Обработка результатов
         trade_results = []
         successful_count = 0
         total_tokens_bought = 0
+        total_sol_spent = 0
 
         for i, result in enumerate(results):
             if isinstance(result, Exception):
-                logger.error(f"Trade {i + 1} failed with exception: {result}")
+                logger.error(f"❌ Сделка {i + 1} упала с исключением: {result}")
                 trade_results.append(TradeResult(
                     success=False,
                     signature=None,
                     error=str(result),
-                    input_amount=settings.trading.trade_amount_sol,
+                    input_amount=amounts[i] if i < len(amounts) else amount_per_trade,
                     output_amount=None,
                     price_impact=None,
                     execution_time_ms=0,
@@ -145,148 +204,184 @@ class HighSpeedJupiterTrader:
                 trade_results.append(result)
                 if result.success:
                     successful_count += 1
+                    total_sol_spent += result.input_amount
                     if result.output_amount:
                         total_tokens_bought += result.output_amount
 
         total_time = (time.time() - start_time) * 1000
 
-        # Log summary
-        logger.critical(f"🎯 SNIPER COMPLETE:")
-        logger.info(f"  ✅ Successful trades: {successful_count}/{settings.trading.num_purchases}")
-        logger.info(f"  💰 Total SOL spent: {successful_count * settings.trading.trade_amount_sol}")
-        logger.info(f"  🪙 Total tokens bought: {total_tokens_bought:,.0f}")
-        logger.info(f"  ⚡ Total execution time: {total_time:.0f}ms")
-        logger.info(f"  📊 Average per trade: {total_time / settings.trading.num_purchases:.0f}ms")
+        # Логируем итоги
+        self.log_sniper_summary(
+            token_address, successful_count, num_trades,
+            total_sol_spent, total_tokens_bought, total_time, source_info
+        )
 
-        # Update stats
+        # Обновляем статистику
         self.total_trades += len(trade_results)
         self.successful_trades += successful_count
         self.failed_trades += (len(trade_results) - successful_count)
+        self.total_sol_spent += total_sol_spent
+        self.total_tokens_bought += total_tokens_bought
 
         return trade_results
 
-    async def execute_single_trade(self, token_address: str, trade_index: int, source_info: Dict) -> TradeResult:
-        """Execute a single trade with Jupiter"""
+    def calculate_smart_amounts(self, total_amount: float, num_trades: int) -> List[float]:
+        """
+        Умное распределение размеров сделок для минимизации проскальзывания
+        Первые сделки больше, последние меньше
+        """
+        if num_trades == 1:
+            return [total_amount]
+
+        # Создаем убывающую последовательность
+        # 40% в первой сделке, затем убывание
+        amounts = []
+        remaining = total_amount
+
+        for i in range(num_trades):
+            if i == num_trades - 1:
+                # Последняя сделка - остаток
+                amounts.append(remaining)
+            else:
+                # Уменьшающийся размер
+                factor = (num_trades - i) / num_trades
+                amount = (total_amount / num_trades) * (1 + factor * 0.5)
+                amount = min(amount, remaining * 0.6)  # Не больше 60% остатка
+                amounts.append(round(amount, 4))
+                remaining -= amount
+
+        return amounts
+
+    async def execute_single_trade(self, token_address: str, trade_index: int,
+                                   amount_sol: float, source_info: Dict) -> TradeResult:
+        """Выполнение одной сделки через Jupiter"""
         start_time = time.time()
 
         try:
-            logger.debug(f"Starting trade {trade_index + 1} for {token_address}")
+            logger.debug(f"🚀 Запуск сделки {trade_index + 1}: {amount_sol} SOL -> {token_address}")
 
-            # Step 1: Get quote from Jupiter
+            # Шаг 1: Получаем котировку от Jupiter
             quote = await self.get_quote(
                 input_mint=settings.trading.base_token,  # SOL
                 output_mint=token_address,
-                amount=int(settings.trading.trade_amount_sol * 1e9),  # Convert to lamports
+                amount=int(amount_sol * 1e9),  # Конвертируем в lamports
                 slippage_bps=settings.trading.slippage_bps
             )
 
             if not quote:
-                return TradeResult(
-                    success=False,
-                    signature=None,
-                    error="Failed to get quote",
-                    input_amount=settings.trading.trade_amount_sol,
-                    output_amount=None,
-                    price_impact=None,
-                    execution_time_ms=(time.time() - start_time) * 1000,
-                    trade_index=trade_index
+                return self.create_failed_result("Не удалось получить котировку",
+                                                 amount_sol, trade_index, start_time)
+
+            # Проверяем price impact
+            price_impact = float(quote.price_impact_pct)
+            if price_impact > settings.security.max_price_impact:
+                return self.create_failed_result(
+                    f"Слишком большое проскальзывание: {price_impact}%",
+                    amount_sol, trade_index, start_time
                 )
 
-            logger.debug(f"Trade {trade_index + 1} quote: {quote.out_amount} tokens, {quote.price_impact_pct}% impact")
+            logger.debug(
+                f"💹 Сделка {trade_index + 1} котировка: {quote.out_amount} токенов, {price_impact}% проскальзывание")
 
-            # Step 2: Get swap transaction
+            # Шаг 2: Получаем транзакцию обмена
             swap_transaction = await self.get_swap_transaction(quote)
 
             if not swap_transaction:
-                return TradeResult(
-                    success=False,
-                    signature=None,
-                    error="Failed to get swap transaction",
-                    input_amount=settings.trading.trade_amount_sol,
-                    output_amount=None,
-                    price_impact=float(quote.price_impact_pct),
-                    execution_time_ms=(time.time() - start_time) * 1000,
-                    trade_index=trade_index
-                )
+                return self.create_failed_result("Не удалось создать транзакцию обмена",
+                                                 amount_sol, trade_index, start_time)
 
-            # Step 3: Sign and send transaction
+            # Шаг 3: Подписываем и отправляем транзакцию
             signature = await self.send_transaction(swap_transaction)
 
             if signature:
-                output_amount = float(quote.out_amount) / 1e9  # Convert from lamports
-                logger.success(f"Trade {trade_index + 1} SUCCESS: {signature}")
+                output_amount = float(quote.out_amount) / 1e9  # Конвертируем из lamports
+                execution_time = (time.time() - start_time) * 1000
+
+                logger.success(f"✅ Сделка {trade_index + 1} УСПЕШНА: {signature} ({execution_time:.0f}ms)")
 
                 return TradeResult(
                     success=True,
                     signature=signature,
                     error=None,
-                    input_amount=settings.trading.trade_amount_sol,
+                    input_amount=amount_sol,
                     output_amount=output_amount,
-                    price_impact=float(quote.price_impact_pct),
-                    execution_time_ms=(time.time() - start_time) * 1000,
+                    price_impact=price_impact,
+                    execution_time_ms=execution_time,
                     trade_index=trade_index
                 )
             else:
-                return TradeResult(
-                    success=False,
-                    signature=None,
-                    error="Transaction failed to send",
-                    input_amount=settings.trading.trade_amount_sol,
-                    output_amount=None,
-                    price_impact=float(quote.price_impact_pct),
-                    execution_time_ms=(time.time() - start_time) * 1000,
-                    trade_index=trade_index
-                )
+                return self.create_failed_result("Транзакция не отправилась",
+                                                 amount_sol, trade_index, start_time)
 
         except Exception as e:
-            logger.error(f"Trade {trade_index + 1} error: {e}")
-            return TradeResult(
-                success=False,
-                signature=None,
-                error=str(e),
-                input_amount=settings.trading.trade_amount_sol,
-                output_amount=None,
-                price_impact=None,
-                execution_time_ms=(time.time() - start_time) * 1000,
-                trade_index=trade_index
-            )
+            logger.error(f"❌ Ошибка сделки {trade_index + 1}: {e}")
+            return self.create_failed_result(str(e), amount_sol, trade_index, start_time)
 
-    async def get_quote(self, input_mint: str, output_mint: str, amount: int, slippage_bps: int) -> Optional[
-        QuoteResponse]:
-        """Get quote from Jupiter API"""
+    def create_failed_result(self, error: str, amount: float, trade_index: int, start_time: float) -> TradeResult:
+        """Создание результата неудачной сделки"""
+        return TradeResult(
+            success=False,
+            signature=None,
+            error=error,
+            input_amount=amount,
+            output_amount=None,
+            price_impact=None,
+            execution_time_ms=(time.time() - start_time) * 1000,
+            trade_index=trade_index
+        )
+
+    async def get_quote(self, input_mint: str, output_mint: str, amount: int,
+                        slippage_bps: int) -> Optional[QuoteResponse]:
+        """Получение котировки от Jupiter API"""
         try:
+            # Проверяем кэш для быстрого доступа
+            cache_key = f"{input_mint}:{output_mint}:{amount}:{slippage_bps}"
+            if cache_key in self.quote_cache:
+                cached_time, quote = self.quote_cache[cache_key]
+                if time.time() - cached_time < 2:  # Кэш на 2 секунды
+                    return quote
+
             url = f"{settings.jupiter.api_url}/quote"
             params = {
                 'inputMint': input_mint,
                 'outputMint': output_mint,
                 'amount': amount,
                 'slippageBps': slippage_bps,
-                'onlyDirectRoutes': False,  # Allow multi-hop for better prices
-                'asLegacyTransaction': False
+                'onlyDirectRoutes': False,
+                'asLegacyTransaction': False,
+                'platformFeeBps': 0,
+                'maxAccounts': 64
             }
 
             async with self.session.get(url, params=params) as response:
                 if response.status == 200:
                     data = await response.json()
-                    return QuoteResponse(
+                    quote = QuoteResponse(
                         input_mint=data['inputMint'],
                         output_mint=data['outputMint'],
                         in_amount=data['inAmount'],
                         out_amount=data['outAmount'],
                         price_impact_pct=data.get('priceImpactPct', '0'),
-                        route_plan=data.get('routePlan', [])
+                        route_plan=data.get('routePlan', []),
+                        other_amount_threshold=data.get('otherAmountThreshold'),
+                        swap_mode=data.get('swapMode')
                     )
+
+                    # Кэшируем результат
+                    self.quote_cache[cache_key] = (time.time(), quote)
+
+                    return quote
                 else:
                     error_text = await response.text()
-                    logger.error(f"Quote API error {response.status}: {error_text}")
+                    logger.error(f"❌ Ошибка Quote API {response.status}: {error_text}")
                     return None
 
         except Exception as e:
-            logger.error(f"Failed to get quote: {e}")
+            logger.error(f"❌ Ошибка получения котировки: {e}")
             return None
 
     async def get_swap_transaction(self, quote: QuoteResponse) -> Optional[str]:
-        """Get swap transaction from Jupiter API"""
+        """Получение транзакции обмена от Jupiter API"""
         try:
             url = f"{settings.jupiter.swap_api_url}"
             payload = {
@@ -302,7 +397,10 @@ class HighSpeedJupiterTrader:
                 'wrapAndUnwrapSol': True,
                 'useSharedAccounts': True,
                 'feeAccount': None,
-                'prioritizationFeeLamports': settings.trading.priority_fee
+                'prioritizationFeeLamports': settings.trading.priority_fee,
+                'asLegacyTransaction': False,
+                'useTokenLedger': False,
+                'destinationTokenAccount': None
             }
 
             async with self.session.post(url, json=payload) as response:
@@ -311,118 +409,135 @@ class HighSpeedJupiterTrader:
                     return data.get('swapTransaction')
                 else:
                     error_text = await response.text()
-                    logger.error(f"Swap API error {response.status}: {error_text}")
+                    logger.error(f"❌ Ошибка Swap API {response.status}: {error_text}")
                     return None
 
         except Exception as e:
-            logger.error(f"Failed to get swap transaction: {e}")
+            logger.error(f"❌ Ошибка получения транзакции обмена: {e}")
             return None
 
     async def send_transaction(self, swap_transaction_b64: str) -> Optional[str]:
-        """Sign and send transaction to Solana"""
+        """Подпись и отправка транзакции в Solana"""
         try:
-            # Decode transaction
+            # Декодируем транзакцию
             transaction_bytes = base64.b64decode(swap_transaction_b64)
             transaction = VersionedTransaction.from_bytes(transaction_bytes)
 
-            # Sign transaction
+            # Подписываем транзакцию
             transaction.sign([self.wallet_keypair])
 
-            # Send with high priority
+            # Отправляем с высоким приоритетом
+            opts = TxOpts(
+                skip_preflight=True,  # Пропускаем симуляцию для скорости
+                preflight_commitment=Confirmed,
+                max_retries=settings.trading.max_retries
+            )
+
             response = await self.solana_client.send_raw_transaction(
-                bytes(transaction),
-                opts={
-                    'skipPreflight': True,  # Skip simulation for speed
-                    'preflightCommitment': 'confirmed',
-                    'maxRetries': settings.trading.max_retries
-                }
+                bytes(transaction), opts=opts
             )
 
             if response.value:
                 signature = str(response.value)
-                logger.debug(f"Transaction sent: {signature}")
-
-                # Optional: Wait for confirmation (can be disabled for speed)
-                # await self.confirm_transaction(signature)
-
+                logger.debug(f"📤 Транзакция отправлена: {signature}")
                 return signature
             else:
-                logger.error("Transaction failed to send")
+                logger.error("❌ Транзакция не отправилась")
                 return None
 
         except Exception as e:
-            logger.error(f"Failed to send transaction: {e}")
+            logger.error(f"❌ Ошибка отправки транзакции: {e}")
             return None
 
-    async def confirm_transaction(self, signature: str, timeout: float = 30.0) -> bool:
-        """Confirm transaction (optional, slows down execution)"""
+    async def security_check(self, token_address: str) -> bool:
+        """Быстрая проверка безопасности токена"""
         try:
-            start_time = time.time()
-            while time.time() - start_time < timeout:
-                status = await self.solana_client.get_signature_statuses([signature])
-                if status.value and status.value[0]:
-                    confirmation_status = status.value[0]
-                    if confirmation_status.confirmation_status:
-                        logger.debug(f"Transaction confirmed: {signature}")
-                        return True
+            if not settings.security.enable_security_checks:
+                return True
 
-                await asyncio.sleep(1)
+            # Проверяем ликвидность пула
+            pool_info = await self.get_pool_info(token_address)
+            if not pool_info:
+                logger.warning(f"⚠️ Не удалось получить информацию о пуле для {token_address}")
+                return False
 
-            logger.warning(f"Transaction confirmation timeout: {signature}")
-            return False
+            if pool_info.liquidity_sol < settings.security.min_liquidity_sol:
+                logger.warning(
+                    f"⚠️ Недостаточная ликвидность: {pool_info.liquidity_sol} SOL < {settings.security.min_liquidity_sol} SOL")
+                return False
+
+            logger.info(f"✅ Проверка безопасности пройдена: {pool_info.liquidity_sol} SOL ликвидности")
+            return True
 
         except Exception as e:
-            logger.error(f"Failed to confirm transaction: {e}")
+            logger.error(f"❌ Ошибка проверки безопасности: {e}")
             return False
 
-    async def get_token_balance(self, token_address: str) -> float:
-        """Get token balance for the wallet"""
+    async def get_pool_info(self, token_address: str) -> Optional[PoolInfo]:
+        """Получение информации о ликвидности пула"""
         try:
-            # Implementation depends on token type (SPL token)
-            # This is a simplified version
-            response = await self.solana_client.get_token_accounts_by_owner(
-                self.wallet_keypair.pubkey(),
-                {'mint': Pubkey.from_string(token_address)}
+            # Здесь должна быть логика получения информации о пуле
+            # Можно использовать Jupiter API или прямые запросы к DEX
+
+            # Заглушка - в реальности нужно реализовать
+            return PoolInfo(
+                liquidity_sol=10.0,  # Пример
+                price=0.001,
+                market_cap=1000000,
+                volume_24h=50000,
+                holders_count=100
             )
 
-            if response.value:
-                # Parse token account balance
-                # This would need proper SPL token parsing
-                return 0.0
-
-            return 0.0
-
         except Exception as e:
-            logger.error(f"Failed to get token balance: {e}")
-            return 0.0
+            logger.error(f"❌ Ошибка получения информации о пуле: {e}")
+            return None
+
+    def log_sniper_summary(self, token_address: str, successful: int, total: int,
+                           sol_spent: float, tokens_bought: float, total_time: float, source_info: Dict):
+        """Логирование итогов снайперской атаки"""
+        logger.critical("🎯 ИТОГИ СНАЙПЕР АТАКИ:")
+        logger.info(f"  📍 Контракт: {token_address}")
+        logger.info(f"  📱 Источник: {source_info.get('platform', 'unknown')} - {source_info.get('source', 'unknown')}")
+        logger.info(f"  ✅ Успешных сделок: {successful}/{total}")
+        logger.info(f"  💰 Потрачено SOL: {sol_spent:.4f}")
+        logger.info(f"  🪙 Куплено токенов: {tokens_bought:,.0f}")
+        logger.info(f"  ⚡ Общее время: {total_time:.0f}ms")
+
+        if total > 0:
+            logger.info(f"  📊 Среднее время на сделку: {total_time / total:.0f}ms")
+            success_rate = (successful / total) * 100
+            logger.info(f"  📈 Процент успеха: {success_rate:.1f}%")
 
     async def get_sol_balance(self) -> float:
-        """Get SOL balance"""
+        """Получение баланса SOL"""
         try:
             response = await self.solana_client.get_balance(self.wallet_keypair.pubkey())
             if response.value:
-                return response.value / 1e9  # Convert lamports to SOL
+                return response.value / 1e9  # Конвертируем lamports в SOL
             return 0.0
         except Exception as e:
-            logger.error(f"Failed to get SOL balance: {e}")
+            logger.error(f"❌ Ошибка получения баланса SOL: {e}")
             return 0.0
 
     async def health_check(self) -> Dict:
-        """Health check for trading system"""
+        """Проверка здоровья торговой системы"""
         try:
-            # Check Solana connection
+            # Проверяем соединение с Solana
             response = await self.solana_client.get_health()
             solana_healthy = response.value == "ok"
 
-            # Check Jupiter API
-            async with self.session.get(f"{settings.jupiter.api_url}/quote") as resp:
-                jupiter_healthy = resp.status in [200, 400]  # 400 is expected without params
+            # Проверяем Jupiter API
+            async with self.session.get(
+                    f"{settings.jupiter.api_url}/quote?inputMint=So11111111111111111111111111111111111111112&outputMint=EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v&amount=1000000&slippageBps=50") as resp:
+                jupiter_healthy = resp.status == 200
 
-            # Check wallet balance
+            # Проверяем баланс кошелька
             sol_balance = await self.get_sol_balance()
 
+            status = "healthy" if solana_healthy and jupiter_healthy else "degraded"
+
             return {
-                "status": "healthy" if solana_healthy and jupiter_healthy else "degraded",
+                "status": status,
                 "solana_rpc": "healthy" if solana_healthy else "error",
                 "jupiter_api": "healthy" if jupiter_healthy else "error",
                 "wallet_address": str(self.wallet_keypair.pubkey()),
@@ -431,7 +546,9 @@ class HighSpeedJupiterTrader:
                     "total_trades": self.total_trades,
                     "successful_trades": self.successful_trades,
                     "failed_trades": self.failed_trades,
-                    "success_rate": self.successful_trades / max(self.total_trades, 1) * 100
+                    "success_rate": self.successful_trades / max(self.total_trades, 1) * 100,
+                    "total_sol_spent": self.total_sol_spent,
+                    "total_tokens_bought": self.total_tokens_bought
                 }
             }
 
@@ -439,5 +556,5 @@ class HighSpeedJupiterTrader:
             return {"status": "error", "message": str(e)}
 
 
-# Global trader instance
-jupiter_trader = HighSpeedJupiterTrader()
+# Глобальный экземпляр трейдера
+jupiter_trader = UltraFastJupiterTrader()
