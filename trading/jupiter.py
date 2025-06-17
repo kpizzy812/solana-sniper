@@ -481,7 +481,7 @@ class UltraFastJupiterTrader:
                     'outputMint': quote.output_mint,
                     'inAmount': quote.in_amount,
                     'outAmount': quote.out_amount,
-                    'otherAmountThreshold': quote.other_amount_threshold,  # КРИТИЧНОЕ ПОЛЕ!
+                    'otherAmountThreshold': quote.other_amount_threshold,
                     'swapMode': quote.swap_mode,
                     'slippageBps': quote.slippage_bps,
                     'platformFee': quote.platform_fee,
@@ -489,14 +489,14 @@ class UltraFastJupiterTrader:
                     'routePlan': quote.route_plan
                 },
                 'userPublicKey': str(self.wallet_keypair.pubkey()),
+                # УБИРАЕМ useSharedAccounts - именно он вызывает ошибку Simple AMMs
+                # 'useSharedAccounts': True,  <-- УДАЛИТЬ ЭТУ СТРОКУ
                 'wrapAndUnwrapSol': True,
-                'useSharedAccounts': True,
                 'feeAccount': None,
                 'asLegacyTransaction': False,
                 'useTokenLedger': False,
                 'destinationTokenAccount': None,
-                # НОВЫЕ ОПТИМИЗАЦИОННЫЕ ПАРАМЕТРЫ
-                'dynamicComputeUnitLimit': True,  # Автоматический расчет compute units
+                'dynamicComputeUnitLimit': True,
                 'prioritizationFeeLamports': {
                     'priorityLevelWithMaxLamports': {
                         'maxLamports': settings.trading.priority_fee,
@@ -547,8 +547,9 @@ class UltraFastJupiterTrader:
                     'routePlan': quote.route_plan
                 },
                 'userPublicKey': str(self.wallet_keypair.pubkey()),
+                # УБИРАЕМ useSharedAccounts - причина ошибки Simple AMMs
+                # 'useSharedAccounts': True,  <-- УДАЛИТЬ ЭТУ СТРОКУ
                 'wrapAndUnwrapSol': True,
-                'useSharedAccounts': True,
                 'feeAccount': None,
                 'asLegacyTransaction': False,
                 'useTokenLedger': False,
