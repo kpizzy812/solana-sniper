@@ -120,11 +120,26 @@ class MonitoringConfig:
     twitter_interval: float = 2.0  # Twitter имеет более строгие лимиты
     website_interval: float = 5.0
 
-    # Telegram настройки
+    # Telegram Bot API настройки (для совместимости)
     telegram_bot_token: str = os.getenv('TELEGRAM_BOT_TOKEN', '')
     telegram_channels: List[str] = None
     telegram_groups: List[str] = None
     telegram_admin_usernames: List[str] = None  # Список админов для фильтрации
+
+    # Telegram User Bot настройки (новые)
+    telegram_api_id: str = os.getenv('TELEGRAM_API_ID', '')
+    telegram_api_hash: str = os.getenv('TELEGRAM_API_HASH', '')
+    telegram_session_name: str = os.getenv('TELEGRAM_SESSION_NAME', 'mori_sniper_session')
+    telegram_phone_number: str = os.getenv('TELEGRAM_PHONE_NUMBER', '')
+
+    # Режим работы Telegram
+    use_user_bot: bool = os.getenv('USE_TELEGRAM_USER_BOT', 'true').lower() in ['true', '1', 'yes']
+    use_bot_api: bool = os.getenv('USE_TELEGRAM_BOT_API', 'false').lower() in ['true', '1', 'yes']
+
+    # User Bot каналы и группы
+    user_bot_channels: List[str] = None  # Каналы для User Bot
+    user_bot_groups: List[str] = None  # Группы для User Bot
+    user_bot_admin_usernames: List[str] = None  # Админы для User Bot
 
     # Twitter/X настройки
     twitter_bearer_token: str = os.getenv('TWITTER_BEARER_TOKEN', '')
@@ -135,6 +150,7 @@ class MonitoringConfig:
     website_selectors: List[str] = None
 
     def __post_init__(self):
+        # Telegram Bot API каналы/группы (старые настройки)
         if self.telegram_channels is None:
             self.telegram_channels = [
                 os.getenv('TELEGRAM_CHANNEL_1', ''),
@@ -153,12 +169,36 @@ class MonitoringConfig:
                 os.getenv('TELEGRAM_ADMIN_2', '')
             ]
 
+        # Telegram User Bot каналы/группы (новые настройки)
+        if self.user_bot_channels is None:
+            self.user_bot_channels = [
+                os.getenv('USER_BOT_CHANNEL_1', ''),
+                os.getenv('USER_BOT_CHANNEL_2', ''),
+                os.getenv('USER_BOT_CHANNEL_3', ''),
+            ]
+
+        if self.user_bot_groups is None:
+            self.user_bot_groups = [
+                os.getenv('USER_BOT_GROUP_1', ''),
+                os.getenv('USER_BOT_GROUP_2', ''),
+                os.getenv('USER_BOT_GROUP_3', ''),
+            ]
+
+        if self.user_bot_admin_usernames is None:
+            self.user_bot_admin_usernames = [
+                os.getenv('USER_BOT_ADMIN_1', ''),
+                os.getenv('USER_BOT_ADMIN_2', ''),
+                os.getenv('USER_BOT_ADMIN_3', ''),
+            ]
+
+        # Twitter настройки
         if self.twitter_usernames is None:
             self.twitter_usernames = [
                 os.getenv('TWITTER_USERNAME_1', ''),
                 os.getenv('TWITTER_USERNAME_2', '')
             ]
 
+        # Website настройки
         if self.website_urls is None:
             self.website_urls = [
                 os.getenv('WEBSITE_URL_1', ''),
@@ -235,11 +275,15 @@ class AIConfig:
 
 @dataclass
 class JupiterConfig:
-    api_url: str = 'https://quote-api.jup.ag/v6'
-    swap_api_url: str = 'https://quote-api.jup.ag/v6/swap'
-    price_api_url: str = 'https://price.jup.ag/v4/price'
+    # ПРАВИЛЬНЫЕ Jupiter API endpoints (январь 2025)
+    # ВАЖНО: Правильная структура путей для v1 API
+    lite_api_url: str = 'https://lite-api.jup.ag/swap/v1'  # Бесплатный endpoint (ПРИОРИТЕТ)
+    api_url: str = 'https://api.jup.ag/swap/v1'  # Платный endpoint (требует API ключи)
+    price_api_url: str = 'https://lite-api.jup.ag/price/v2'  # Price API v2 (бесплатный)
     timeout: float = 5.0  # Таймаут API
     max_concurrent_requests: int = 20  # Увеличено для параллельных сделок
+    use_lite_api: bool = True  # Использовать бесплатный endpoint по умолчанию
+    api_key: str = os.getenv('JUPITER_API_KEY', '')  # API ключ для платных планов
 
 
 @dataclass
@@ -296,12 +340,24 @@ class Settings:
         if not self.solana.private_key:
             errors.append("Нужен SOLANA_PRIVATE_KEY или SOLANA_SEED_PHRASE")
 
-        if not any([
-            self.monitoring.telegram_bot_token,
-            self.monitoring.twitter_bearer_token,
-            any(self.monitoring.website_urls)
-        ]):
-            errors.append("Нужен хотя бы один токен API соцсетей или URL сайта")
+        # Проверяем настройки Telegram мониторинга
+        telegram_configured = False
+
+        if self.monitoring.use_user_bot:
+            if self.monitoring.telegram_api_id and self.monitoring.telegram_api_hash:
+                telegram_configured = True
+            else:
+                errors.append("Для User Bot нужны TELEGRAM_API_ID и TELEGRAM_API_HASH")
+
+        if self.monitoring.use_bot_api:
+            if self.monitoring.telegram_bot_token:
+                telegram_configured = True
+            else:
+                errors.append("Для Bot API нужен TELEGRAM_BOT_TOKEN")
+
+        if not telegram_configured and not self.monitoring.twitter_bearer_token and not any(
+                self.monitoring.website_urls):
+            errors.append("Нужен хотя бы один метод мониторинга (Telegram User Bot/Bot API, Twitter или Website)")
 
         if self.ai.use_ai_confirmation and not self.ai.openai_api_key:
             logger.warning("⚠️ AI подтверждение отключено - нет OPENAI_API_KEY")
@@ -352,22 +408,109 @@ def is_valid_solana_address(address: str) -> bool:
     return True
 
 
+def extract_jupiter_swap_addresses(text: str) -> List[str]:
+    """Специальный парсер для Jupiter swap ссылок с улучшенным regex"""
+    # Более строгий regex который останавливается на первом не-base58 символе
+    jupiter_pattern = re.compile(
+        r'jup\.ag/swap/([A-HJ-NP-Za-km-z1-9]{32,44})(?:[^A-HJ-NP-Za-km-z1-9]|$)-([A-HJ-NP-Za-km-z1-9]{32,44})(?:[^A-HJ-NP-Za-km-z1-9]|$)',
+        re.IGNORECASE
+    )
+
+    addresses = []
+
+    # Также пробуем более простой подход с разделением
+    if 'jup.ag/swap/' in text.lower():
+        # Ищем паттерн вручную для большей точности
+        swap_part = text.lower().split('jup.ag/swap/')[1] if 'jup.ag/swap/' in text.lower() else ''
+        if swap_part:
+            # Убираем все что после первого пробела или спецсимвола
+            swap_part = swap_part.split()[0].split('?')[0].split('#')[0].split('&')[0]
+
+            if '-' in swap_part:
+                from_token, to_token = swap_part.split('-', 1)
+
+                logger.critical(f"🔗 JUPITER SWAP ПАРСИНГ: '{from_token}' -> '{to_token}'")
+
+                # Очищаем токены от лишних символов
+                from_token_clean = ''.join(
+                    c for c in from_token if c in '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz')
+                to_token_clean = ''.join(
+                    c for c in to_token if c in '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz')
+
+                logger.critical(f"🧹 ОЧИЩЕННЫЕ ТОКЕНЫ: '{from_token_clean}' -> '{to_token_clean}'")
+
+                # Проверяем длину после очистки
+                if 32 <= len(from_token_clean) <= 44 and 32 <= len(to_token_clean) <= 44:
+                    # Проверяем оба токена
+                    if is_valid_solana_address(from_token_clean):
+                        if is_wrapped_sol(from_token_clean):
+                            logger.debug(f"📍 FROM токен - Wrapped SOL (пропускаем): {from_token_clean}")
+                        else:
+                            logger.info(f"📍 FROM токен найден: {from_token_clean}")
+                            addresses.append(from_token_clean)
+
+                    if is_valid_solana_address(to_token_clean):
+                        if is_wrapped_sol(to_token_clean):
+                            logger.debug(f"📍 TO токен - Wrapped SOL (пропускаем): {to_token_clean}")
+                        else:
+                            logger.critical(f"🎯 ЦЕЛЕВОЙ ТОКЕН НАЙДЕН: {to_token_clean}")
+                            addresses.append(to_token_clean)
+                else:
+                    logger.warning(
+                        f"⚠️ Неверная длина токенов после очистки: {len(from_token_clean)}, {len(to_token_clean)}")
+
+    return addresses
+
+
+def is_wrapped_sol(address: str) -> bool:
+    """Проверка является ли адрес Wrapped SOL"""
+    return address == 'So11111111111111111111111111111111111111112'
+
+
+def filter_trading_targets(addresses: List[str]) -> List[str]:
+    """Фильтрация адресов для торговли (исключаем SOL и известные базовые токены)"""
+    filtered = []
+
+    # Известные базовые токены которые НЕ покупаем
+    base_tokens = {
+        'So11111111111111111111111111111111111111112',  # Wrapped SOL
+        'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v',  # USDC
+        'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB',  # USDT
+        '11111111111111111111111111111112',  # System Program
+    }
+
+    for addr in addresses:
+        if addr not in base_tokens:
+            logger.info(f"✅ Целевой токен для торговли: {addr}")
+            filtered.append(addr)
+        else:
+            logger.debug(f"⏭️ Пропускаем базовый токен: {addr}")
+
+    return filtered
+
+
 def extract_addresses_fast(text: str) -> List[str]:
-    """Ультра-быстрое извлечение адресов через regex"""
+    """Ультра-быстрое извлечение адресов через regex с правильным парсингом Jupiter ссылок"""
     addresses = set()
 
     # ОТЛАДКА: Логируем входной текст
     logger.debug(f"🔍 Анализируем текст: {text}")
+
+    # СПЕЦИАЛЬНАЯ ОБРАБОТКА JUPITER ССЫЛОК (ПРИОРИТЕТ!)
+    jupiter_addresses = extract_jupiter_swap_addresses(text)
+    if jupiter_addresses:
+        logger.critical(f"🎯 JUPITER SWAP НАЙДЕН: {jupiter_addresses}")
+        addresses.update(jupiter_addresses)
 
     # Получаем паттерны - исправляем потенциальную ошибку
     try:
         patterns = settings.ai.solana_address_patterns
         if not patterns:
             logger.warning("⚠️ Паттерны адресов не инициализированы")
-            return []
+            return list(addresses)  # Возвращаем Jupiter результаты если есть
     except AttributeError:
         logger.error("❌ Ошибка доступа к паттернам адресов")
-        return []
+        return list(addresses)  # Возвращаем Jupiter результаты если есть
 
     for i, pattern in enumerate(patterns):
         try:
@@ -382,6 +525,11 @@ def extract_addresses_fast(text: str) -> List[str]:
                 if addr:
                     logger.debug(f"🔍 Проверяем адрес: {addr}")
                     if is_valid_solana_address(addr):
+                        # ФИЛЬТРУЕМ WRAPPED SOL
+                        if is_wrapped_sol(addr):
+                            logger.debug(f"⏭️ Пропускаем Wrapped SOL: {addr}")
+                            continue
+
                         logger.info(f"✅ ВАЛИДНЫЙ АДРЕС НАЙДЕН: {addr}")
                         addresses.add(addr)
                     else:
@@ -389,8 +537,9 @@ def extract_addresses_fast(text: str) -> List[str]:
         except Exception as e:
             logger.error(f"❌ Ошибка в паттерне {i}: {e}")
 
-    result = list(addresses)
-    logger.info(f"🎯 ИТОГО НАЙДЕНО АДРЕСОВ: {len(result)} | {result}")
+    # Фильтруем адреса для торговли
+    result = filter_trading_targets(list(addresses))
+    logger.info(f"🎯 ИТОГО НАЙДЕНО ЦЕЛЕВЫХ ТОКЕНОВ: {len(result)} | {result}")
     return result
 
 
@@ -435,8 +584,10 @@ def ensure_patterns_initialized():
 
         logger.success(f"✅ Инициализировано {len(settings.ai._solana_address_patterns)} паттернов")
 
+
 # Вызываем инициализацию при импорте
 ensure_patterns_initialized()
+
 
 def has_urgent_keywords(text: str) -> bool:
     """Быстрое обнаружение ключевых слов"""
@@ -449,13 +600,19 @@ def is_admin_message(username: str, user_id: int = None) -> bool:
     if not username:
         return False
 
-    # Проверяем по имени пользователя
-    admin_usernames = [admin.lower() for admin in settings.monitoring.telegram_admin_usernames if admin]
-    return username.lower() in admin_usernames
+    # Проверяем по имени пользователя для User Bot
+    user_bot_admins = [admin.lower() for admin in settings.monitoring.user_bot_admin_usernames if admin]
+    if username.lower() in user_bot_admins:
+        return True
+
+    # Проверяем по имени пользователя для Bot API
+    bot_api_admins = [admin.lower() for admin in settings.monitoring.telegram_admin_usernames if admin]
+    return username.lower() in bot_api_admins
 
 
 # Экспорт основных настроек
 __all__ = [
     'settings', 'is_valid_solana_address', 'extract_addresses_fast',
-    'has_urgent_keywords', 'is_admin_message'
+    'has_urgent_keywords', 'is_admin_message', 'extract_jupiter_swap_addresses',
+    'is_wrapped_sol', 'filter_trading_targets'
 ]

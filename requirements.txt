@@ -10,6 +10,7 @@ base58==2.1.1
 
 # Социальные сети API
 python-telegram-bot==20.7
+telethon==1.34.0  # Telegram User Bot (рекомендуется для быстрого мониторинга)
 tweepy==4.14.0
 beautifulsoup4==4.12.2
 
@@ -43,6 +44,9 @@ aiolimiter==1.1.0
 
 # Конфигурация
 pyyaml==6.0.1
+
+# Криптография и мнемоника (для seed phrase)
+mnemonic==0.20
 
 # Инструменты разработки
 pytest==7.4.3

@@ -28,7 +28,12 @@ except ImportError:
 from loguru import logger
 from config.settings import settings
 from ai.analyzer import analyzer
-from monitors.telegram import telegram_monitor
+
+# ================================
+# ИСПРАВЛЕННЫЕ ИМПОРТЫ МОНИТОРОВ
+# ================================
+from monitors.telegram import telegram_monitor, TELEGRAM_BOT_AVAILABLE
+from monitors.telegram_user import telegram_user_monitor, TELETHON_AVAILABLE
 from monitors.twitter import twitter_monitor
 from monitors.website import website_monitor
 from trading.jupiter import jupiter_trader
@@ -128,16 +133,10 @@ class MoriSniperBot:
             logger.error("❌ Jupiter Trader failed to start")
             raise Exception("Trading system initialization failed")
 
-        # Initialize Telegram monitor
-        if settings.monitoring.telegram_bot_token:
-            telegram_monitor.trading_callback = self.handle_trading_signal
-            if await telegram_monitor.start():
-                logger.success("✅ Telegram Monitor ready")
-                self.monitors['telegram'] = telegram_monitor
-            else:
-                logger.warning("⚠️ Telegram Monitor not available")
-        else:
-            logger.info("⏭️ Telegram token not configured, skipping Telegram monitor")
+        # ================================
+        # ИСПРАВЛЕННАЯ ЛОГИКА TELEGRAM МОНИТОРИНГА
+        # ================================
+        await self.initialize_telegram_monitors()
 
         # Initialize Twitter monitor
         if settings.monitoring.twitter_bearer_token:
@@ -162,6 +161,85 @@ class MoriSniperBot:
             logger.info("⏭️ Website URLs not configured, skipping Website monitor")
 
         logger.success(f"✅ {len(self.monitors)} monitors initialized")
+
+    async def initialize_telegram_monitors(self):
+        """Инициализация Telegram мониторов с правильной логикой выбора"""
+        logger.critical("🔍 ИНИЦИАЛИЗАЦИЯ TELEGRAM МОНИТОРИНГА...")
+
+        # Диагностика настроек
+        logger.info(f"📱 USE_TELEGRAM_USER_BOT: {settings.monitoring.use_user_bot}")
+        logger.info(f"🤖 USE_TELEGRAM_BOT_API: {settings.monitoring.use_bot_api}")
+        logger.info(f"📚 Telethon доступен: {TELETHON_AVAILABLE}")
+        logger.info(f"🔧 Bot API доступен: {TELEGRAM_BOT_AVAILABLE}")
+
+        telegram_monitor_started = False
+
+        # ================================
+        # 1. ПРИОРИТЕТ: USER BOT (если включен и доступен)
+        # ================================
+        if settings.monitoring.use_user_bot:
+            logger.critical("🎯 ПОПЫТКА ЗАПУСКА USER BOT...")
+
+            if not TELETHON_AVAILABLE:
+                logger.error("❌ Telethon не установлен! User Bot недоступен")
+                logger.error("💡 Установите: pip install telethon")
+            elif not telegram_user_monitor:
+                logger.error("❌ User Bot монитор не инициализирован")
+            elif not settings.monitoring.telegram_api_id or not settings.monitoring.telegram_api_hash:
+                logger.error("❌ User Bot настройки не полные (нет API_ID/API_HASH)")
+            else:
+                # Пробуем запустить User Bot
+                telegram_user_monitor.trading_callback = self.handle_trading_signal
+
+                try:
+                    if await telegram_user_monitor.start():
+                        logger.critical("🎉 USER BOT ЗАПУЩЕН УСПЕШНО!")
+                        self.monitors['telegram_user'] = telegram_user_monitor
+                        telegram_monitor_started = True
+                    else:
+                        logger.error("❌ User Bot не смог запуститься")
+                except Exception as e:
+                    logger.error(f"❌ Ошибка запуска User Bot: {e}")
+
+        # ================================
+        # 2. РЕЗЕРВ: BOT API (если User Bot не работает и Bot API включен)
+        # ================================
+        if not telegram_monitor_started and settings.monitoring.use_bot_api:
+            logger.warning("🔄 User Bot не работает, пробуем Bot API...")
+
+            if not TELEGRAM_BOT_AVAILABLE:
+                logger.error("❌ python-telegram-bot не установлен! Bot API недоступен")
+                logger.error("💡 Установите: pip install python-telegram-bot")
+            elif not telegram_monitor:
+                logger.error("❌ Bot API монитор не инициализирован")
+            elif not settings.monitoring.telegram_bot_token:
+                logger.error("❌ Bot API токен не настроен")
+            else:
+                # Пробуем запустить Bot API
+                telegram_monitor.trading_callback = self.handle_trading_signal
+
+                try:
+                    if await telegram_monitor.start():
+                        logger.warning("⚠️ BOT API ЗАПУЩЕН (резервный режим)")
+                        logger.warning("⚠️ ВНИМАНИЕ: Bot API получает только сообщения где бот упомянут!")
+                        self.monitors['telegram_bot'] = telegram_monitor
+                        telegram_monitor_started = True
+                    else:
+                        logger.error("❌ Bot API не смог запуститься")
+                except Exception as e:
+                    logger.error(f"❌ Ошибка запуска Bot API: {e}")
+
+        # ================================
+        # РЕЗУЛЬТАТ ИНИЦИАЛИЗАЦИИ TELEGRAM
+        # ================================
+        if telegram_monitor_started:
+            if 'telegram_user' in self.monitors:
+                logger.critical("✅ TELEGRAM USER BOT АКТИВЕН - Полный доступ к сообщениям!")
+            elif 'telegram_bot' in self.monitors:
+                logger.warning("⚠️ TELEGRAM BOT API АКТИВЕН - Ограниченный доступ к сообщениям")
+        else:
+            logger.error("❌ НИ ОДИН TELEGRAM МОНИТОР НЕ ЗАПУЩЕН!")
+            logger.error("💡 Проверьте настройки и установите необходимые библиотеки")
 
     async def start_monitoring(self):
         """Start all monitoring systems"""
@@ -296,7 +374,7 @@ class MoriSniperBot:
 
         if self.stats['contracts_detected'] > 0:
             success_rate = (self.stats['trades_executed'] / (
-                        self.stats['contracts_detected'] * settings.trading.num_purchases)) * 100
+                    self.stats['contracts_detected'] * settings.trading.num_purchases)) * 100
             logger.info(f"  Trade success rate: {success_rate:.1f}%")
 
     async def stop(self):
