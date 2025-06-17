@@ -388,13 +388,17 @@ class Settings:
 settings = Settings()
 
 
-# Быстрые функции валидации адресов
+# ИСПРАВЛЕННЫЕ Быстрые функции валидации адресов
 def is_valid_solana_address(address: str) -> bool:
-    """Быстрая валидация формата Solana адреса"""
+    """Строгая валидация формата Solana адреса с base58 декодированием"""
+    if not address or not isinstance(address, str):
+        return False
+
+    # Проверка длины (32-44 символа для base58)
     if len(address) < 32 or len(address) > 44:
         return False
 
-    # Набор символов Base58
+    # Набор символов Base58 (исключает 0, O, I, l для избежания путаницы)
     base58_chars = set('123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz')
     if not all(c in base58_chars for c in address):
         return False
@@ -402,62 +406,104 @@ def is_valid_solana_address(address: str) -> bool:
     # Исключаем очевидные ложные срабатывания
     if address == '1' * len(address):  # Все единицы
         return False
-    if address.isupper() or address.islower():  # Все в одном регистре
+    if len(set(address)) < 8:  # Слишком мало уникальных символов
         return False
 
-    return True
+    # КРИТИЧНАЯ ПРОВЕРКА: Реальное base58 декодирование
+    try:
+        import base58
+        decoded = base58.b58decode(address)
+        # Solana адреса должны быть ровно 32 байта
+        if len(decoded) != 32:
+            return False
+        return True
+    except Exception:
+        return False
 
 
 def extract_jupiter_swap_addresses(text: str) -> List[str]:
-    """Специальный парсер для Jupiter swap ссылок с улучшенным regex"""
-    # Более строгий regex который останавливается на первом не-base58 символе
-    jupiter_pattern = re.compile(
-        r'jup\.ag/swap/([A-HJ-NP-Za-km-z1-9]{32,44})(?:[^A-HJ-NP-Za-km-z1-9]|$)-([A-HJ-NP-Za-km-z1-9]{32,44})(?:[^A-HJ-NP-Za-km-z1-9]|$)',
-        re.IGNORECASE
-    )
-
+    """Улучшенный парсер для Jupiter swap ссылок с строгой валидацией"""
     addresses = []
 
-    # Также пробуем более простой подход с разделением
-    if 'jup.ag/swap/' in text.lower():
-        # Ищем паттерн вручную для большей точности
-        swap_part = text.lower().split('jup.ag/swap/')[1] if 'jup.ag/swap/' in text.lower() else ''
-        if swap_part:
-            # Убираем все что после первого пробела или спецсимвола
-            swap_part = swap_part.split()[0].split('?')[0].split('#')[0].split('&')[0]
+    # Поиск Jupiter ссылок в тексте
+    if 'jup.ag/swap/' not in text.lower():
+        return addresses
 
-            if '-' in swap_part:
-                from_token, to_token = swap_part.split('-', 1)
+    logger.debug(f"🔍 Обнаружена Jupiter ссылка в тексте: {text}")
 
-                logger.critical(f"🔗 JUPITER SWAP ПАРСИНГ: '{from_token}' -> '{to_token}'")
+    # Используем более точный regex для Jupiter URLs
+    jupiter_patterns = [
+        # Основной паттерн: jup.ag/swap/TOKEN1-TOKEN2
+        r'jup\.ag/swap/([A-HJ-NP-Za-km-z1-9]{32,44})-([A-HJ-NP-Za-km-z1-9]{32,44})',
+        # Альтернативный: jup.ag/swap?inputMint=TOKEN1&outputMint=TOKEN2
+        r'jup\.ag/swap\?.*?(?:inputMint|outputMint)=([A-HJ-NP-Za-km-z1-9]{32,44})',
+        # Простой поиск токенов после jup.ag/
+        r'jup\.ag/[^?\s]*?([A-HJ-NP-Za-km-z1-9]{32,44})'
+    ]
 
-                # Очищаем токены от лишних символов
-                from_token_clean = ''.join(
-                    c for c in from_token if c in '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz')
-                to_token_clean = ''.join(
-                    c for c in to_token if c in '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz')
+    for pattern in jupiter_patterns:
+        matches = re.finditer(pattern, text, re.IGNORECASE)
+        for match in matches:
+            # Извлекаем все группы из матча
+            for group in match.groups():
+                if group and is_valid_solana_address(group):
+                    # Дополнительная фильтрация: пропускаем Wrapped SOL
+                    if not is_wrapped_sol(group):
+                        logger.info(f"✅ Jupiter токен найден: {group}")
+                        addresses.append(group)
+                    else:
+                        logger.debug(f"⏭️ Пропускаем Wrapped SOL: {group}")
 
-                logger.critical(f"🧹 ОЧИЩЕННЫЕ ТОКЕНЫ: '{from_token_clean}' -> '{to_token_clean}'")
+    # Если основные паттерны не сработали, пробуем ручной парсинг
+    if not addresses:
+        addresses.extend(manual_jupiter_parsing(text))
 
-                # Проверяем длину после очистки
-                if 32 <= len(from_token_clean) <= 44 and 32 <= len(to_token_clean) <= 44:
-                    # Проверяем оба токена
-                    if is_valid_solana_address(from_token_clean):
-                        if is_wrapped_sol(from_token_clean):
-                            logger.debug(f"📍 FROM токен - Wrapped SOL (пропускаем): {from_token_clean}")
-                        else:
-                            logger.info(f"📍 FROM токен найден: {from_token_clean}")
-                            addresses.append(from_token_clean)
+    return addresses
 
-                    if is_valid_solana_address(to_token_clean):
-                        if is_wrapped_sol(to_token_clean):
-                            logger.debug(f"📍 TO токен - Wrapped SOL (пропускаем): {to_token_clean}")
-                        else:
-                            logger.critical(f"🎯 ЦЕЛЕВОЙ ТОКЕН НАЙДЕН: {to_token_clean}")
-                            addresses.append(to_token_clean)
+
+def manual_jupiter_parsing(text: str) -> List[str]:
+    """Ручной парсинг Jupiter ссылок для сложных случаев"""
+    addresses = []
+
+    try:
+        # Ищем части URL после jup.ag/swap/
+        parts = text.lower().split('jup.ag/swap/')
+        if len(parts) < 2:
+            return addresses
+
+        # Берем часть после jup.ag/swap/
+        url_part = parts[1].split()[0].split('?')[0].split('#')[0]
+        logger.debug(f"🔍 Извлеченная часть URL: {url_part}")
+
+        # Разделяем по дефису для формата TOKEN1-TOKEN2
+        if '-' in url_part:
+            tokens = url_part.split('-')
+            for token in tokens:
+                # Очищаем от лишних символов
+                clean_token = ''.join(
+                    c for c in token if c in '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz')
+
+                logger.debug(f"🧹 Проверяем очищенный токен: {clean_token}")
+
+                if is_valid_solana_address(clean_token):
+                    if not is_wrapped_sol(clean_token):
+                        logger.info(f"✅ Найден валидный токен: {clean_token}")
+                        addresses.append(clean_token)
+                    else:
+                        logger.debug(f"⏭️ Пропускаем Wrapped SOL: {clean_token}")
                 else:
-                    logger.warning(
-                        f"⚠️ Неверная длина токенов после очистки: {len(from_token_clean)}, {len(to_token_clean)}")
+                    logger.debug(f"❌ Невалидный токен: {clean_token}")
+
+        # Дополнительный поиск отдельных токенов в URL
+        all_potential_tokens = re.findall(r'[A-HJ-NP-Za-km-z1-9]{32,44}', url_part)
+        for token in all_potential_tokens:
+            if is_valid_solana_address(token) and not is_wrapped_sol(token):
+                if token not in addresses:
+                    logger.info(f"✅ Дополнительный токен найден: {token}")
+                    addresses.append(token)
+
+    except Exception as e:
+        logger.error(f"❌ Ошибка ручного парсинга Jupiter: {e}")
 
     return addresses
 
@@ -490,11 +536,11 @@ def filter_trading_targets(addresses: List[str]) -> List[str]:
 
 
 def extract_addresses_fast(text: str) -> List[str]:
-    """Ультра-быстрое извлечение адресов через regex с правильным парсингом Jupiter ссылок"""
+    """Ультра-быстрое извлечение адресов с улучшенной валидацией"""
     addresses = set()
 
     # ОТЛАДКА: Логируем входной текст
-    logger.debug(f"🔍 Анализируем текст: {text}")
+    logger.debug(f"🔍 Анализируем текст: {text[:200]}...")
 
     # СПЕЦИАЛЬНАЯ ОБРАБОТКА JUPITER ССЫЛОК (ПРИОРИТЕТ!)
     jupiter_addresses = extract_jupiter_swap_addresses(text)
@@ -502,15 +548,15 @@ def extract_addresses_fast(text: str) -> List[str]:
         logger.critical(f"🎯 JUPITER SWAP НАЙДЕН: {jupiter_addresses}")
         addresses.update(jupiter_addresses)
 
-    # Получаем паттерны - исправляем потенциальную ошибку
+    # Получаем паттерны
     try:
         patterns = settings.ai.solana_address_patterns
         if not patterns:
             logger.warning("⚠️ Паттерны адресов не инициализированы")
-            return list(addresses)  # Возвращаем Jupiter результаты если есть
+            return list(addresses)
     except AttributeError:
         logger.error("❌ Ошибка доступа к паттернам адресов")
-        return list(addresses)  # Возвращаем Jupiter результаты если есть
+        return list(addresses)
 
     for i, pattern in enumerate(patterns):
         try:
@@ -523,7 +569,9 @@ def extract_addresses_fast(text: str) -> List[str]:
                 addr = match if isinstance(match, str) else match[0] if match else ''
 
                 if addr:
-                    logger.debug(f"🔍 Проверяем адрес: {addr}")
+                    logger.debug(f"🔍 Проверяем адрес из паттерна {i}: {addr}")
+
+                    # СТРОГАЯ ВАЛИДАЦИЯ
                     if is_valid_solana_address(addr):
                         # ФИЛЬТРУЕМ WRAPPED SOL
                         if is_wrapped_sol(addr):
@@ -541,52 +589,6 @@ def extract_addresses_fast(text: str) -> List[str]:
     result = filter_trading_targets(list(addresses))
     logger.info(f"🎯 ИТОГО НАЙДЕНО ЦЕЛЕВЫХ ТОКЕНОВ: {len(result)} | {result}")
     return result
-
-
-# Также добавим принудительную инициализацию паттернов
-def ensure_patterns_initialized():
-    """Принудительная инициализация паттернов"""
-    if not hasattr(settings.ai, '_solana_address_patterns') or not settings.ai._solana_address_patterns:
-        logger.info("🔧 Инициализируем паттерны адресов...")
-
-        settings.ai._solana_address_patterns = [
-            # Основной паттерн Solana адресов
-            re.compile(r'\b[1-9A-HJ-NP-Za-km-z]{32,44}\b'),
-
-            # Паттерны с ключевыми словами
-            re.compile(r'contract[:\s]*([1-9A-HJ-NP-Za-km-z]{32,44})', re.IGNORECASE),
-            re.compile(r'mint[:\s]*([1-9A-HJ-NP-Za-km-z]{32,44})', re.IGNORECASE),
-            re.compile(r'address[:\s]*([1-9A-HJ-NP-Za-km-z]{32,44})', re.IGNORECASE),
-            re.compile(r'ca[:\s]*([1-9A-HJ-NP-Za-km-z]{32,44})', re.IGNORECASE),
-            re.compile(r'токен[:\s]*([1-9A-HJ-NP-Za-km-z]{32,44})', re.IGNORECASE),
-            re.compile(r'контракт[:\s]*([1-9A-HJ-NP-Za-km-z]{32,44})', re.IGNORECASE),
-
-            # Jupiter паттерны (улучшенные)
-            re.compile(r'jup\.ag/swap/[^-]*-([1-9A-HJ-NP-Za-km-z]{32,44})', re.IGNORECASE),
-            re.compile(r'jup\.ag.*?([1-9A-HJ-NP-Za-km-z]{32,44})', re.IGNORECASE),
-
-            # Другие DEX паттерны
-            re.compile(r'raydium\.io/.*?([1-9A-HJ-NP-Za-km-z]{32,44})', re.IGNORECASE),
-            re.compile(r'dexscreener\.com/solana/([1-9A-HJ-NP-Za-km-z]{32,44})', re.IGNORECASE),
-            re.compile(r'birdeye\.so/token/([1-9A-HJ-NP-Za-km-z]{32,44})', re.IGNORECASE),
-
-            # URL параметры
-            re.compile(r'[?&]token=([1-9A-HJ-NP-Za-km-z]{32,44})', re.IGNORECASE),
-            re.compile(r'[?&]mint=([1-9A-HJ-NP-Za-km-z]{32,44})', re.IGNORECASE),
-            re.compile(r'[?&]address=([1-9A-HJ-NP-Za-km-z]{32,44})', re.IGNORECASE),
-
-            # Разделенные дефисом адреса
-            re.compile(r'[/-]([1-9A-HJ-NP-Za-km-z]{32,44})(?:[?&#/\s]|$)', re.IGNORECASE),
-
-            # Специальный паттерн для точного извлечения из Jupiter ссылок
-            re.compile(r'So11111111111111111111111111111111111111112-([1-9A-HJ-NP-Za-km-z]{32,44})', re.IGNORECASE),
-        ]
-
-        logger.success(f"✅ Инициализировано {len(settings.ai._solana_address_patterns)} паттернов")
-
-
-# Вызываем инициализацию при импорте
-ensure_patterns_initialized()
 
 
 def has_urgent_keywords(text: str) -> bool:
@@ -609,6 +611,53 @@ def is_admin_message(username: str, user_id: int = None) -> bool:
     bot_api_admins = [admin.lower() for admin in settings.monitoring.telegram_admin_usernames if admin]
     return username.lower() in bot_api_admins
 
+
+# Обновленные regex паттерны с более строгой валидацией
+def ensure_patterns_initialized():
+    """Принудительная инициализация улучшенных паттернов"""
+    if not hasattr(settings.ai, '_solana_address_patterns') or not settings.ai._solana_address_patterns:
+        logger.info("🔧 Инициализируем улучшенные паттерны адресов...")
+
+        settings.ai._solana_address_patterns = [
+            # Основной паттерн Solana адресов (32-44 символа, строго base58)
+            re.compile(r'\b[1-9A-HJ-NP-Za-km-z]{32,44}\b'),
+
+            # Паттерны с ключевыми словами (более строгие границы)
+            re.compile(r'\bcontract[:\s=]+([1-9A-HJ-NP-Za-km-z]{32,44})\b', re.IGNORECASE),
+            re.compile(r'\bmint[:\s=]+([1-9A-HJ-NP-Za-km-z]{32,44})\b', re.IGNORECASE),
+            re.compile(r'\baddress[:\s=]+([1-9A-HJ-NP-Za-km-z]{32,44})\b', re.IGNORECASE),
+            re.compile(r'\bca[:\s=]+([1-9A-HJ-NP-Za-km-z]{32,44})\b', re.IGNORECASE),
+            re.compile(r'\bтокен[:\s=]+([1-9A-HJ-NP-Za-km-z]{32,44})\b', re.IGNORECASE),
+            re.compile(r'\bконтракт[:\s=]+([1-9A-HJ-NP-Za-km-z]{32,44})\b', re.IGNORECASE),
+
+            # Jupiter паттерны (улучшенные с границами слов)
+            re.compile(r'\bjup\.ag/swap/[^-\s]*-([1-9A-HJ-NP-Za-km-z]{32,44})[\s?&#]', re.IGNORECASE),
+            re.compile(r'\bjup\.ag[^\s]*?([1-9A-HJ-NP-Za-km-z]{32,44})', re.IGNORECASE),
+
+            # Другие DEX паттерны
+            re.compile(r'\braydium\.io[^\s]*?([1-9A-HJ-NP-Za-km-z]{32,44})', re.IGNORECASE),
+            re.compile(r'\bdexscreener\.com/solana/([1-9A-HJ-NP-Za-km-z]{32,44})', re.IGNORECASE),
+            re.compile(r'\bbirdeye\.so/token/([1-9A-HJ-NP-Za-km-z]{32,44})', re.IGNORECASE),
+
+            # URL параметры с границами
+            re.compile(r'[?&]token=([1-9A-HJ-NP-Za-km-z]{32,44})(?:[&#]|$)', re.IGNORECASE),
+            re.compile(r'[?&]mint=([1-9A-HJ-NP-Za-km-z]{32,44})(?:[&#]|$)', re.IGNORECASE),
+            re.compile(r'[?&]address=([1-9A-HJ-NP-Za-km-z]{32,44})(?:[&#]|$)', re.IGNORECASE),
+
+            # Специальный паттерн для точного извлечения из Jupiter ссылок
+            re.compile(
+                r'So11111111111111111111111111111111111111112-([1-9A-HJ-NP-Za-km-z]{32,44})(?:[^A-HJ-NP-Za-km-z1-9]|$)',
+                re.IGNORECASE),
+
+            # Паттерн для адресов в кавычках или скобках
+            re.compile(r'["\'`\(\[]([1-9A-HJ-NP-Za-km-z]{32,44})["\'`\)\]]'),
+        ]
+
+        logger.success(f"✅ Инициализировано {len(settings.ai._solana_address_patterns)} улучшенных паттернов")
+
+
+# Вызываем инициализацию при импорте
+ensure_patterns_initialized()
 
 # Экспорт основных настроек
 __all__ = [

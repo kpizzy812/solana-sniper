@@ -12,6 +12,7 @@ from solana.rpc.types import TxOpts
 from solders.keypair import Keypair
 from solders.pubkey import Pubkey
 from solders.transaction import VersionedTransaction
+from solders.message import to_bytes_versioned  # ДОБАВЛЕН ИМПОРТ ДЛЯ НОВОГО API
 from solders.system_program import TransferParams, transfer
 from solders.compute_budget import set_compute_unit_limit, set_compute_unit_price
 import base64
@@ -37,15 +38,21 @@ class TradeResult:
 
 @dataclass
 class QuoteResponse:
-    """Ответ от Jupiter API с котировкой"""
+    """Ответ от Jupiter API с котировкой - ИСПРАВЛЕННАЯ СТРУКТУРА"""
     input_mint: str
     output_mint: str
     in_amount: str
     out_amount: str
-    price_impact_pct: str
-    route_plan: List[Dict]
-    other_amount_threshold: Optional[str] = None
-    swap_mode: Optional[str] = None
+    other_amount_threshold: str  # ОБЯЗАТЕЛЬНОЕ ПОЛЕ!
+    swap_mode: str  # ExactIn или ExactOut
+    slippage_bps: int
+    platform_fee: Optional[Dict] = None
+    price_impact_pct: str = "0"
+    route_plan: List[Dict] = None
+
+    def __post_init__(self):
+        if self.route_plan is None:
+            self.route_plan = []
 
 
 @dataclass
@@ -59,7 +66,7 @@ class PoolInfo:
 
 
 class UltraFastJupiterTrader:
-    """Ультра-быстрая торговая система Jupiter"""
+    """Ультра-быстрая торговая система Jupiter с исправлениями API v1"""
 
     def __init__(self):
         self.solana_client: Optional[AsyncClient] = None
@@ -332,7 +339,7 @@ class UltraFastJupiterTrader:
 
     async def get_quote(self, input_mint: str, output_mint: str, amount: int,
                         slippage_bps: int) -> Optional[QuoteResponse]:
-        """Получение котировки от Jupiter API"""
+        """Получение котировки от Jupiter API - ИСПРАВЛЕННАЯ ВЕРСИЯ"""
         try:
             # Проверяем кэш для быстрого доступа
             cache_key = f"{input_mint}:{output_mint}:{amount}:{slippage_bps}"
@@ -342,7 +349,6 @@ class UltraFastJupiterTrader:
                     return quote
 
             # ПРИОРИТЕТ: Используем lite-api (бесплатный)
-            # Если есть API ключ - можем использовать платный endpoint для более высоких лимитов
             if settings.jupiter.api_key and not settings.jupiter.use_lite_api:
                 base_url = settings.jupiter.api_url
                 headers = {
@@ -360,24 +366,30 @@ class UltraFastJupiterTrader:
                 'outputMint': output_mint,
                 'amount': amount,
                 'slippageBps': slippage_bps,
-                'onlyDirectRoutes': False,
-                'asLegacyTransaction': False,
-                'platformFeeBps': 0,
-                'maxAccounts': 64
+                'onlyDirectRoutes': 'false',
+                'asLegacyTransaction': 'false',
+                'platformFeeBps': '0',
+                'maxAccounts': '64'
             }
+
+            logger.debug(f"🔍 Quote запрос: {url} с параметрами: {params}")
 
             async with self.session.get(url, params=params, headers=headers) as response:
                 if response.status == 200:
                     data = await response.json()
+
+                    # ИСПРАВЛЕННАЯ ОБРАБОТКА: добавляем все обязательные поля
                     quote = QuoteResponse(
                         input_mint=data['inputMint'],
                         output_mint=data['outputMint'],
                         in_amount=data['inAmount'],
                         out_amount=data['outAmount'],
+                        other_amount_threshold=data.get('otherAmountThreshold', data['outAmount']),  # КРИТИЧНОЕ ПОЛЕ!
+                        swap_mode=data.get('swapMode', 'ExactIn'),
+                        slippage_bps=slippage_bps,
+                        platform_fee=data.get('platformFee'),
                         price_impact_pct=data.get('priceImpactPct', '0'),
-                        route_plan=data.get('routePlan', []),
-                        other_amount_threshold=data.get('otherAmountThreshold'),
-                        swap_mode=data.get('swapMode')
+                        route_plan=data.get('routePlan', [])
                     )
 
                     # Кэшируем результат
@@ -388,13 +400,10 @@ class UltraFastJupiterTrader:
 
                 elif response.status == 401:
                     logger.warning("⚠️ 401 Unauthorized - переключаемся на lite-api")
-                    # Fallback на lite-api если получили 401
                     return await self.get_quote_fallback(input_mint, output_mint, amount, slippage_bps)
                 else:
                     error_text = await response.text()
                     logger.error(f"❌ Ошибка Quote API {response.status}: {error_text}")
-
-                    # Fallback на другой endpoint
                     return await self.get_quote_fallback(input_mint, output_mint, amount, slippage_bps)
 
         except Exception as e:
@@ -405,7 +414,7 @@ class UltraFastJupiterTrader:
                                  slippage_bps: int) -> Optional[QuoteResponse]:
         """Fallback метод для получения котировки"""
         try:
-            # Пробуем альтернативный endpoint (если используем lite - пробуем платный и наоборот)
+            # Пробуем альтернативный endpoint
             alt_url = settings.jupiter.api_url if settings.jupiter.use_lite_api else settings.jupiter.lite_api_url
             url = f"{alt_url}/quote"
 
@@ -414,14 +423,13 @@ class UltraFastJupiterTrader:
                 'outputMint': output_mint,
                 'amount': amount,
                 'slippageBps': slippage_bps,
-                'onlyDirectRoutes': False,
-                'asLegacyTransaction': False,
-                'platformFeeBps': 0,
-                'maxAccounts': 64
+                'onlyDirectRoutes': 'false',
+                'asLegacyTransaction': 'false',
+                'platformFeeBps': '0',
+                'maxAccounts': '64'
             }
 
             headers = {'Content-Type': 'application/json'}
-            # Добавляем API ключ только для платного endpoint
             if settings.jupiter.api_key and alt_url == settings.jupiter.api_url:
                 headers['x-api-key'] = settings.jupiter.api_key
 
@@ -429,15 +437,18 @@ class UltraFastJupiterTrader:
                 if response.status == 200:
                     data = await response.json()
                     logger.info(f"✅ Fallback quote получена через {alt_url}")
+
                     return QuoteResponse(
                         input_mint=data['inputMint'],
                         output_mint=data['outputMint'],
                         in_amount=data['inAmount'],
                         out_amount=data['outAmount'],
+                        other_amount_threshold=data.get('otherAmountThreshold', data['outAmount']),
+                        swap_mode=data.get('swapMode', 'ExactIn'),
+                        slippage_bps=slippage_bps,
+                        platform_fee=data.get('platformFee'),
                         price_impact_pct=data.get('priceImpactPct', '0'),
-                        route_plan=data.get('routePlan', []),
-                        other_amount_threshold=data.get('otherAmountThreshold'),
-                        swap_mode=data.get('swapMode')
+                        route_plan=data.get('routePlan', [])
                     )
                 else:
                     error_text = await response.text()
@@ -449,10 +460,8 @@ class UltraFastJupiterTrader:
             return None
 
     async def get_swap_transaction(self, quote: QuoteResponse) -> Optional[str]:
-        """Получение транзакции обмена от Jupiter API"""
+        """Получение транзакции обмена от Jupiter API - ИСПРАВЛЕННАЯ ВЕРСИЯ"""
         try:
-            # ПРИОРИТЕТ: Используем lite-api (бесплатный)
-            # Если есть API ключ - можем использовать платный endpoint для более высоких лимитов
             if settings.jupiter.api_key and not settings.jupiter.use_lite_api:
                 base_url = settings.jupiter.api_url
                 headers = {
@@ -465,12 +474,17 @@ class UltraFastJupiterTrader:
 
             url = f"{base_url}/swap"
 
+            # ИСПРАВЛЕННЫЙ PAYLOAD - передаем ПОЛНЫЙ quote response
             payload = {
                 'quoteResponse': {
                     'inputMint': quote.input_mint,
                     'outputMint': quote.output_mint,
                     'inAmount': quote.in_amount,
                     'outAmount': quote.out_amount,
+                    'otherAmountThreshold': quote.other_amount_threshold,  # КРИТИЧНОЕ ПОЛЕ!
+                    'swapMode': quote.swap_mode,
+                    'slippageBps': quote.slippage_bps,
+                    'platformFee': quote.platform_fee,
                     'priceImpactPct': quote.price_impact_pct,
                     'routePlan': quote.route_plan
                 },
@@ -478,11 +492,21 @@ class UltraFastJupiterTrader:
                 'wrapAndUnwrapSol': True,
                 'useSharedAccounts': True,
                 'feeAccount': None,
-                'prioritizationFeeLamports': settings.trading.priority_fee,
                 'asLegacyTransaction': False,
                 'useTokenLedger': False,
-                'destinationTokenAccount': None
+                'destinationTokenAccount': None,
+                # НОВЫЕ ОПТИМИЗАЦИОННЫЕ ПАРАМЕТРЫ
+                'dynamicComputeUnitLimit': True,  # Автоматический расчет compute units
+                'prioritizationFeeLamports': {
+                    'priorityLevelWithMaxLamports': {
+                        'maxLamports': settings.trading.priority_fee,
+                        'priorityLevel': 'veryHigh'
+                    }
+                }
             }
+
+            logger.debug(f"🔍 Swap запрос: {url}")
+            logger.debug(f"📝 Payload: {json.dumps(payload, indent=2)}")
 
             async with self.session.post(url, json=payload, headers=headers) as response:
                 if response.status == 200:
@@ -492,13 +516,10 @@ class UltraFastJupiterTrader:
 
                 elif response.status == 401:
                     logger.warning("⚠️ 401 Unauthorized при создании swap - переключаемся на lite-api")
-                    # Fallback на lite-api если получили 401
                     return await self.get_swap_transaction_fallback(quote)
                 else:
                     error_text = await response.text()
                     logger.error(f"❌ Ошибка Swap API {response.status}: {error_text}")
-
-                    # Fallback на другой endpoint
                     return await self.get_swap_transaction_fallback(quote)
 
         except Exception as e:
@@ -508,7 +529,7 @@ class UltraFastJupiterTrader:
     async def get_swap_transaction_fallback(self, quote: QuoteResponse) -> Optional[str]:
         """Fallback метод для получения транзакции обмена"""
         try:
-            # Пробуем альтернативный endpoint (если используем lite - пробуем платный и наоборот)
+            # Пробуем альтернативный endpoint
             alt_url = settings.jupiter.api_url if settings.jupiter.use_lite_api else settings.jupiter.lite_api_url
             url = f"{alt_url}/swap"
 
@@ -518,6 +539,10 @@ class UltraFastJupiterTrader:
                     'outputMint': quote.output_mint,
                     'inAmount': quote.in_amount,
                     'outAmount': quote.out_amount,
+                    'otherAmountThreshold': quote.other_amount_threshold,
+                    'swapMode': quote.swap_mode,
+                    'slippageBps': quote.slippage_bps,
+                    'platformFee': quote.platform_fee,
                     'priceImpactPct': quote.price_impact_pct,
                     'routePlan': quote.route_plan
                 },
@@ -525,16 +550,23 @@ class UltraFastJupiterTrader:
                 'wrapAndUnwrapSol': True,
                 'useSharedAccounts': True,
                 'feeAccount': None,
-                'prioritizationFeeLamports': settings.trading.priority_fee,
                 'asLegacyTransaction': False,
                 'useTokenLedger': False,
-                'destinationTokenAccount': None
+                'destinationTokenAccount': None,
+                'dynamicComputeUnitLimit': True,
+                'prioritizationFeeLamports': {
+                    'priorityLevelWithMaxLamports': {
+                        'maxLamports': settings.trading.priority_fee,
+                        'priorityLevel': 'veryHigh'
+                    }
+                }
             }
 
             headers = {'Content-Type': 'application/json'}
-            # Добавляем API ключ только для платного endpoint
             if settings.jupiter.api_key and alt_url == settings.jupiter.api_url:
                 headers['x-api-key'] = settings.jupiter.api_key
+
+            logger.debug(f"🔄 Fallback Swap запрос: {url}")
 
             async with self.session.post(url, json=payload, headers=headers) as response:
                 if response.status == 200:
@@ -551,14 +583,24 @@ class UltraFastJupiterTrader:
             return None
 
     async def send_transaction(self, swap_transaction_b64: str) -> Optional[str]:
-        """Подпись и отправка транзакции в Solana"""
+        """Подпись и отправка транзакции в Solana - ИСПРАВЛЕННАЯ ВЕРСИЯ ДЛЯ SOLDERS 0.26.0"""
         try:
             # Декодируем транзакцию
             transaction_bytes = base64.b64decode(swap_transaction_b64)
-            transaction = VersionedTransaction.from_bytes(transaction_bytes)
+            raw_transaction = VersionedTransaction.from_bytes(transaction_bytes)
 
-            # Подписываем транзакцию
-            transaction.sign([self.wallet_keypair])
+            logger.debug(f"🔍 Декодированная транзакция: message={raw_transaction.message}")
+
+            # ИСПРАВЛЕННЫЙ СПОСОБ: Подписываем сообщение через keypair.sign_message()
+            message_bytes = to_bytes_versioned(raw_transaction.message)
+            signature = self.wallet_keypair.sign_message(message_bytes)
+
+            logger.debug(f"🔐 Подпись создана: {signature}")
+
+            # Создаем подписанную транзакцию через populate()
+            signed_transaction = VersionedTransaction.populate(raw_transaction.message, [signature])
+
+            logger.debug(f"✅ Транзакция подписана успешно")
 
             # Отправляем с высоким приоритетом
             opts = TxOpts(
@@ -567,20 +609,27 @@ class UltraFastJupiterTrader:
                 max_retries=settings.trading.max_retries
             )
 
-            response = await self.solana_client.send_raw_transaction(
-                bytes(transaction), opts=opts
-            )
+            response = await self.solana_client.send_transaction(signed_transaction, opts=opts)
 
             if response.value:
-                signature = str(response.value)
-                logger.debug(f"📤 Транзакция отправлена: {signature}")
-                return signature
+                signature_str = str(response.value)
+                logger.debug(f"📤 Транзакция отправлена: {signature_str}")
+                return signature_str
             else:
                 logger.error("❌ Транзакция не отправилась")
                 return None
 
         except Exception as e:
             logger.error(f"❌ Ошибка отправки транзакции: {e}")
+            logger.error(f"🔍 Тип ошибки: {type(e).__name__}")
+
+            # Дополнительная диагностика
+            try:
+                logger.error(f"🔍 Детали транзакции: message_type={type(raw_transaction.message)}")
+                logger.error(f"🔍 Wallet pubkey: {self.wallet_keypair.pubkey()}")
+            except:
+                pass
+
             return None
 
     async def security_check(self, token_address: str) -> bool:
@@ -664,6 +713,8 @@ class UltraFastJupiterTrader:
             }
 
             headers = {'Content-Type': 'application/json'}
+
+            logger.debug(f"🔍 Price API запрос: {url} с параметрами: {params}")
 
             async with self.session.get(url, params=params, headers=headers) as response:
                 if response.status == 200:
@@ -809,7 +860,6 @@ class UltraFastJupiterTrader:
 
             # Проверяем Jupiter API - используем правильный бесплатный endpoint
             try:
-                # ИСПРАВЛЕННЫЙ путь: /swap/v1/quote вместо /v6/quote
                 test_url = f"{settings.jupiter.lite_api_url}/quote"
                 params = {
                     'inputMint': 'So11111111111111111111111111111111111111112',
