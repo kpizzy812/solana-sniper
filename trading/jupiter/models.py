@@ -4,7 +4,7 @@
 """
 
 from typing import Dict, List, Optional
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 @dataclass
@@ -39,11 +39,7 @@ class QuoteResponse:
     slippage_bps: int
     platform_fee: Optional[Dict] = None
     price_impact_pct: str = "0"
-    route_plan: List[Dict] = None
-
-    def __post_init__(self):
-        if self.route_plan is None:
-            self.route_plan = []
+    route_plan: List[Dict] = field(default_factory=list)
 
     @property
     def price_impact_float(self) -> float:
@@ -137,8 +133,13 @@ class PoolInfo:
     @property
     def is_liquid_enough(self) -> bool:
         """Проверка достаточности ликвидности"""
-        from config.settings import settings
-        return self.liquidity_sol >= settings.security.min_liquidity_sol
+        # Импортируем локально чтобы избежать циклических импортов
+        try:
+            from config.settings import settings
+            return self.liquidity_sol >= settings.security.min_liquidity_sol
+        except ImportError:
+            # Fallback значение если настройки недоступны
+            return self.liquidity_sol >= 5.0
 
     def __str__(self):
         return f"Pool(liquidity={self.liquidity_sol:.2f} SOL, price={self.price:.8f})"
@@ -151,7 +152,7 @@ class TradingSession:
     source_info: Dict
     start_time: float
     amounts: List[float]
-    results: List[TradeResult]
+    results: List[TradeResult] = field(default_factory=list)
     total_sol_spent: float = 0.0
     total_tokens_bought: float = 0.0
 
