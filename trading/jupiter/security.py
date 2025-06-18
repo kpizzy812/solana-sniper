@@ -5,7 +5,7 @@
 
 import asyncio
 import time
-from typing import Optional
+from typing import Optional, Dict
 from loguru import logger
 
 from config.settings import settings
