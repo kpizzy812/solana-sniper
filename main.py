@@ -274,7 +274,7 @@ class MoriSniperBot:
                 await asyncio.sleep(5)
 
     async def handle_trading_signal(self, signal_data: Dict):
-        """Handle trading signal from monitors"""
+        """Handle trading signal from monitors - ОБНОВЛЕН для поддержки множественных кошельков"""
         try:
             logger.critical("🚨 TRADING SIGNAL RECEIVED")
             logger.info(f"Platform: {signal_data['platform']}")
@@ -289,20 +289,45 @@ class MoriSniperBot:
             for contract_address in signal_data['contracts']:
                 logger.critical(f"🎯 EXECUTING SNIPER TRADES FOR: {contract_address}")
 
-                # Security checks could be added here
-                # if not await self.security_check(contract_address):
-                #     continue
+                # ОБНОВЛЕНО: Проверяем режим торговли (множественные кошельки или стандартный)
+                if (hasattr(jupiter_trader, 'multi_wallet_manager') and
+                        jupiter_trader.multi_wallet_manager and
+                        hasattr(jupiter_trader, 'multi_wallet_config') and
+                        jupiter_trader.multi_wallet_config.is_enabled()):
 
-                # Execute concurrent trades
-                trade_results = await jupiter_trader.execute_sniper_trades(
-                    token_address=contract_address,
-                    source_info=signal_data
-                )
+                    logger.critical("🎭 ИСПОЛЬЗУЕМ МНОЖЕСТВЕННЫЕ КОШЕЛЬКИ")
+
+                    # Множественные кошельки возвращают MultiWalletTradeResult
+                    multi_result = await jupiter_trader.multi_wallet_manager.execute_multi_wallet_trades(
+                        token_address=contract_address,
+                        base_trade_amount=settings.trading.trade_amount_sol,
+                        num_trades=settings.trading.num_purchases,
+                        source_info=signal_data
+                    )
+
+                    # Конвертируем в стандартный формат для статистики
+                    trade_results = []
+                    for wallet_address, trade_result in multi_result.wallet_results:
+                        trade_results.append(trade_result)
+
+                    successful_trades = multi_result.successful_trades
+                    total_sol_spent = multi_result.total_sol_spent
+
+                else:
+                    logger.info("📱 ИСПОЛЬЗУЕМ СТАНДАРТНЫЙ КОШЕЛЕК")
+
+                    # Стандартная торговля
+                    trade_results = await jupiter_trader.execute_sniper_trades(
+                        token_address=contract_address,
+                        source_info=signal_data
+                    )
+
+                    successful_trades = sum(1 for result in trade_results if result.success)
+                    total_sol_spent = successful_trades * settings.trading.trade_amount_sol
 
                 # Update stats
-                successful_trades = sum(1 for result in trade_results if result.success)
                 self.stats['trades_executed'] += len(trade_results)
-                self.stats['total_sol_spent'] += successful_trades * settings.trading.trade_amount_sol
+                self.stats['total_sol_spent'] += total_sol_spent
 
                 # Log results summary
                 self.log_trade_results(contract_address, trade_results, signal_data)

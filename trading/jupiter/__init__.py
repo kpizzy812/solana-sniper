@@ -15,6 +15,9 @@ from .models import TradeResult, PoolInfo
 from .client import JupiterAPIClient
 from .executor import JupiterTradeExecutor
 from .security import JupiterSecurityChecker
+from trading.multi_wallet_manager import MultiWalletManager
+from config.multi_wallet import MultiWalletConfig
+
 
 
 class UltraFastJupiterTrader:
@@ -26,6 +29,8 @@ class UltraFastJupiterTrader:
         self.jupiter_client: Optional[JupiterAPIClient] = None
         self.executor: Optional[JupiterTradeExecutor] = None
         self.security_checker: Optional[JupiterSecurityChecker] = None
+        self.multi_wallet_manager: Optional[MultiWalletManager] = None
+        self.multi_wallet_config = MultiWalletConfig()
 
         # Состояние системы
         self.running = False
@@ -62,6 +67,8 @@ class UltraFastJupiterTrader:
                 jupiter_client=self.jupiter_client
             )
             logger.debug("✅ Система безопасности инициализирована")
+            # 5. Инициализация системы множественных кошельков (если доступна и включена)
+            await self._init_multi_wallet_system()
 
             # 5. Тестируем соединения
             health = await self.health_check()
@@ -76,6 +83,31 @@ class UltraFastJupiterTrader:
             logger.error(f"❌ Ошибка запуска Jupiter трейдера: {e}")
             await self.stop()
             return False
+
+    async def _init_multi_wallet_system(self):
+        """Инициализация системы множественных кошельков"""
+        if not self.multi_wallet_config.is_enabled():
+            logger.info("📱 Множественные кошельки отключены - используется стандартный режим")
+            return
+
+        try:
+            from trading.multi_wallet_manager import MultiWalletManager
+
+            self.multi_wallet_manager = MultiWalletManager(
+                solana_client=self.solana_client,
+                jupiter_trader=self
+            )
+
+            success = await self.multi_wallet_manager.start()
+            if success:
+                logger.success("✅ Система множественных кошельков запущена")
+            else:
+                logger.error("❌ Не удалось запустить систему множественных кошельков")
+                self.multi_wallet_manager = None
+
+        except Exception as e:
+            logger.error(f"❌ Ошибка инициализации множественных кошельков: {e}")
+            self.multi_wallet_manager = None
 
     async def stop(self):
         """Остановка и очистка ресурсов"""

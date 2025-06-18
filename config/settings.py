@@ -9,6 +9,7 @@ from .trading import TradingConfig, JupiterConfig
 from .security import SecurityConfig
 from .monitoring import MonitoringConfig
 from .ai import AIConfig
+from .multi_wallet import MultiWalletConfig
 
 
 class Settings:
@@ -26,6 +27,7 @@ class Settings:
         self.logging = LoggingConfig()
         self.alerts = AlertConfig()
         self.rate_limits = RateLimitConfig()
+        self.multi_wallet = MultiWalletConfig()
 
         # Валидация критических настроек
         self.validate()
