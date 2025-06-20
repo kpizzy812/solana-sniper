@@ -24,6 +24,10 @@ class MonitoringConfig:
     telegram_session_name: str = os.getenv('TELEGRAM_SESSION_NAME', 'mori_sniper_session')
     telegram_phone_number: str = os.getenv('TELEGRAM_PHONE_NUMBER', '')
 
+    # User Bot ЛС мониторинг (новое)
+    user_bot_dm_usernames: List[str] = None  # Боты для мониторинга ЛС
+    monitor_private_messages: bool = os.getenv('MONITOR_PRIVATE_MESSAGES', 'false').lower() in ['true', '1', 'yes']
+
     # Режим работы Telegram
     use_user_bot: bool = os.getenv('USE_TELEGRAM_USER_BOT', 'true').lower() in ['true', '1', 'yes']
     use_bot_api: bool = os.getenv('USE_TELEGRAM_BOT_API', 'false').lower() in ['true', '1', 'yes']
@@ -53,6 +57,13 @@ class MonitoringConfig:
             self.telegram_groups = [
                 os.getenv('TELEGRAM_GROUP_1', ''),
                 os.getenv('TELEGRAM_GROUP_2', '')
+            ]
+
+        # User Bot ЛС настройки (новое)
+        if self.user_bot_dm_usernames is None:
+            self.user_bot_dm_usernames = [
+                os.getenv('USER_BOT_DM_1', 'MORIAPPBOT'),  # По умолчанию MORIAPPBOT
+                os.getenv('USER_BOT_DM_2', ''),
             ]
 
         if self.telegram_admin_usernames is None:
@@ -106,6 +117,16 @@ class MonitoringConfig:
                 '.address',
                 '[data-address]'
             ]
+
+    def is_monitored_dm(self, username: str) -> bool:
+        """Проверка, нужно ли мониторить ЛС с этим пользователем/ботом"""
+        if not self.monitor_private_messages:
+            return False
+
+        dm_usernames = [dm.lower().replace('@', '') for dm in self.user_bot_dm_usernames if dm]
+        username_clean = username.lower().replace('@', '') if username else ''
+
+        return username_clean in dm_usernames
 
     def is_admin_message(self, username: str, user_id: int = None) -> bool:
         """Проверка, является ли сообщение от админа"""

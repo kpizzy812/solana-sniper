@@ -66,20 +66,31 @@ def extract_jupiter_swap_addresses(text: str) -> List[str]:
     """Улучшенный парсер для Jupiter swap ссылок с строгой валидацией"""
     addresses = []
 
-    # Поиск Jupiter ссылок в тексте
-    if 'jup.ag/swap/' not in text.lower():
+    # Проверяем наличие различных DEX ссылок
+    dex_indicators = ['jup.ag', 'jupiter', 'raydium', 'dexscreener', 'birdeye', 'pump.fun']
+    if not any(indicator in text.lower() for indicator in dex_indicators):
         return addresses
 
-    logger.debug(f"🔍 Обнаружена Jupiter ссылка в тексте: {text}")
+    logger.debug(f"🔍 Обнаружены DEX ссылки в тексте: {text}")
 
-    # Используем более точный regex для Jupiter URLs
+    # Расширенные паттерны для различных DEX
     jupiter_patterns = [
-        # Основной паттерн: jup.ag/swap/TOKEN1-TOKEN2
+        # Основные Jupiter паттерны
         r'jup\.ag/swap/([A-HJ-NP-Za-km-z1-9]{32,44})-([A-HJ-NP-Za-km-z1-9]{32,44})',
-        # Альтернативный: jup.ag/swap?inputMint=TOKEN1&outputMint=TOKEN2
         r'jup\.ag/swap\?.*?(?:inputMint|outputMint)=([A-HJ-NP-Za-km-z1-9]{32,44})',
-        # Простой поиск токенов после jup.ag/
-        r'jup\.ag/[^?\s]*?([A-HJ-NP-Za-km-z1-9]{32,44})'
+
+        # Новые паттерны для кнопок/redirect ссылок
+        r'jupiter[^?\s]*?([A-HJ-NP-Za-km-z1-9]{32,44})',
+        r'[?&]token=([A-HJ-NP-Za-km-z1-9]{32,44})',
+        r'[?&]mint=([A-HJ-NP-Za-km-z1-9]{32,44})',
+        r'[?&]address=([A-HJ-NP-Za-km-z1-9]{32,44})',
+        r'[?&]ca=([A-HJ-NP-Za-km-z1-9]{32,44})',
+
+        # Другие DEX
+        r'raydium\.io[^\s]*?([A-HJ-NP-Za-km-z1-9]{32,44})',
+        r'dexscreener\.com/solana/([A-HJ-NP-Za-km-z1-9]{32,44})',
+        r'birdeye\.so/token/([A-HJ-NP-Za-km-z1-9]{32,44})',
+        r'pump\.fun[^\s]*?([A-HJ-NP-Za-km-z1-9]{32,44})',
     ]
 
     for pattern in jupiter_patterns:
@@ -101,6 +112,43 @@ def extract_jupiter_swap_addresses(text: str) -> List[str]:
 
     return addresses
 
+
+def extract_addresses_from_any_url(url: str) -> List[str]:
+    """Извлечение адресов из любых URL (включая redirect ссылки)"""
+    addresses = []
+
+    try:
+        # Сначала ищем прямые адреса в URL
+        direct_addresses = extract_jupiter_swap_addresses(url)
+        addresses.extend(direct_addresses)
+
+        # Ищем адреса в параметрах URL
+        import re
+        from urllib.parse import urlparse, parse_qs
+
+        parsed = urlparse(url)
+
+        # Проверяем query параметры
+        if parsed.query:
+            params = parse_qs(parsed.query)
+            for key, values in params.items():
+                if key.lower() in ['token', 'mint', 'address', 'ca', 'contract']:
+                    for value in values:
+                        if is_valid_solana_address(value):
+                            addresses.append(value)
+                            logger.info(f"✅ Адрес из параметра {key}: {value}")
+
+        # Проверяем путь URL
+        path_parts = parsed.path.split('/')
+        for part in path_parts:
+            if is_valid_solana_address(part):
+                addresses.append(part)
+                logger.info(f"✅ Адрес из пути URL: {part}")
+
+    except Exception as e:
+        logger.debug(f"Ошибка парсинга URL {url}: {e}")
+
+    return list(set(addresses))  # Убираем дубликаты
 
 def manual_jupiter_parsing(text: str) -> List[str]:
     """Ручной парсинг Jupiter ссылок для сложных случаев"""
@@ -156,6 +204,17 @@ def extract_addresses_fast(text: str, ai_config) -> List[str]:
     # ОТЛАДКА: Логируем входной текст
     logger.debug(f"🔍 Анализируем текст: {text[:200]}...")
 
+    # НОВАЯ ЛОГИКА: Обработка URL из инлайн кнопок и гиперссылок
+    import re
+    urls_in_text = re.findall(r'https?://[^\s]+', text)
+    if urls_in_text:
+        logger.info(f"🔗 Найдены URL в тексте: {len(urls_in_text)} ссылок")
+        for url in urls_in_text:
+            url_addresses = extract_addresses_from_any_url(url)
+            if url_addresses:
+                logger.critical(f"🎯 АДРЕСА ИЗ URL: {url_addresses}")
+                addresses.update(url_addresses)
+
     # СПЕЦИАЛЬНАЯ ОБРАБОТКА JUPITER ССЫЛОК (ПРИОРИТЕТ!)
     jupiter_addresses = extract_jupiter_swap_addresses(text)
     if jupiter_addresses:
@@ -203,3 +262,46 @@ def extract_addresses_fast(text: str, ai_config) -> List[str]:
     result = filter_trading_targets(list(addresses))
     logger.info(f"🎯 ИТОГО НАЙДЕНО ЦЕЛЕВЫХ ТОКЕНОВ: {len(result)} | {result}")
     return result
+
+
+def extract_addresses_from_message_data(message_text: str, inline_urls: List[str] = None,
+                                        hyperlink_urls: List[str] = None, ai_config=None) -> List[str]:
+    """
+    Комплексное извлечение адресов из всех источников сообщения
+
+    Args:
+        message_text: Основной текст сообщения
+        inline_urls: URL из инлайн кнопок
+        hyperlink_urls: URL из гиперссылок
+        ai_config: Конфигурация AI
+    """
+    all_addresses = set()
+
+    # Анализируем основной текст
+    text_addresses = extract_addresses_fast(message_text, ai_config)
+    all_addresses.update(text_addresses)
+
+    # Анализируем URL из кнопок
+    if inline_urls:
+        logger.info(f"🔘 Анализируем {len(inline_urls)} URL из инлайн кнопок")
+        for url in inline_urls:
+            button_addresses = extract_addresses_from_any_url(url)
+            if button_addresses:
+                logger.critical(f"🎯 КОНТРАКТ ИЗ ИНЛАЙН КНОПКИ: {button_addresses}")
+                all_addresses.update(button_addresses)
+
+    # Анализируем URL из гиперссылок
+    if hyperlink_urls:
+        logger.info(f"🔗 Анализируем {len(hyperlink_urls)} гиперссылок")
+        for url in hyperlink_urls:
+            link_addresses = extract_addresses_from_any_url(url)
+            if link_addresses:
+                logger.critical(f"🎯 КОНТРАКТ ИЗ ГИПЕРССЫЛКИ: {link_addresses}")
+                all_addresses.update(link_addresses)
+
+    final_addresses = filter_trading_targets(list(all_addresses))
+
+    if final_addresses:
+        logger.critical(f"🚨 ИТОГО НАЙДЕНО КОНТРАКТОВ: {len(final_addresses)} | {final_addresses}")
+
+    return final_addresses

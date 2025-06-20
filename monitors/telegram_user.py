@@ -344,6 +344,36 @@ class UltraFastTelegramUserMonitor:
 
         logger.success(f"🎯 Получено {len(self.chat_entities)} чатов для мониторинга")
 
+        # НОВОЕ: Обрабатываем ЛС для мониторинга
+        if settings.monitoring.monitor_private_messages:
+            dm_usernames = [dm for dm in settings.monitoring.user_bot_dm_usernames if dm]
+            logger.info(f"💬 Проверяем ЛС с: {dm_usernames}")
+
+            for dm_username in dm_usernames:
+                try:
+                    logger.debug(f"🔍 Получаем ЛС с: {dm_username}")
+
+                    # Очищаем username от @
+                    clean_username = dm_username.replace('@', '')
+
+                    # Для ЛС используем username напрямую
+                    entity = await self.client.get_entity(clean_username)
+
+                    # Сохраняем entity
+                    self.chat_entities[dm_username] = entity
+
+                    # Получаем все возможные варианты ID для ЛС
+                    all_ids = self.normalize_chat_ids(entity.id)
+                    for chat_id in all_ids:
+                        self.chat_entities_by_id[chat_id] = entity
+                        self.chat_id_mapping[chat_id] = dm_username
+
+                    logger.success(
+                        f"✅ ЛС: {getattr(entity, 'first_name', 'Unknown')} (@{getattr(entity, 'username', dm_username)}) - ID: {entity.id}")
+
+                except Exception as e:
+                    logger.error(f"❌ Ошибка получения ЛС с {dm_username}: {e}")
+
         # Детальная информация о мониторинге
         logger.critical("📍 МОНИТОРИМЫЕ ЧАТЫ:")
         for identifier, entity in self.chat_entities.items():
@@ -441,6 +471,10 @@ class UltraFastTelegramUserMonitor:
                     message_type = 'channel'
                 elif hasattr(chat_entity, 'megagroup'):
                     message_type = 'group'
+                else:
+                    # Проверяем если это приватный чат (ЛС)
+                    if not hasattr(chat_entity, 'title'):  # У приватных чатов нет title
+                        message_type = 'private'
             except Exception as e:
                 logger.debug(f"Не удалось определить тип чата: {e}")
 
@@ -467,25 +501,59 @@ class UltraFastTelegramUserMonitor:
             # Логируем получение сообщения
             logger.info(f"💬 НОВОЕ СООБЩЕНИЕ в {post.chat_title}: @{post.author_username} - {post.content[:100]}...")
 
-            # Фильтрация по админам в группах
+            # Фильтрация сообщений
             if post.message_type == 'group' and not post.is_admin:
                 logger.debug(f"⏭️ Пропускаем сообщение от не-админа @{post.author_username}")
                 return
+            elif post.message_type == 'private':
+                # Проверяем, нужно ли мониторить ЛС с этим пользователем
+                from config.settings import settings
+                if not settings.monitoring.is_monitored_dm(post.author_username):
+                    logger.debug(f"⏭️ Пропускаем ЛС от не мониторимого пользователя @{post.author_username}")
+                    return
+                else:
+                    logger.critical(f"💬 ЛС ОТ МОНИТОРИМОГО БОТА: @{post.author_username}")
 
-            # Добавляем медиа контент если есть
+            # Извлекаем данные из медиа, кнопок и гиперссылок
+            inline_urls = []
+            hyperlink_urls = []
+            media_text = ""
+
             if post.has_media:
                 media_text = await self.extract_media_text(message)
                 if media_text:
                     post.content += f" {media_text}"
 
-            # Быстрый анализ на контракты
-            logger.debug(f"🧠 Анализируем сообщение на контракты...")
-            analysis_result = await analyzer.analyze_post(
-                content=post.content,
-                platform="telegram_user",
-                author=post.author_username,
-                url=post.url
+            # Извлекаем URL из инлайн кнопок
+            if hasattr(message, 'reply_markup') and message.reply_markup:
+                inline_urls = self.extract_inline_button_urls(message.reply_markup)
+
+            # Извлекаем гиперссылки из entities
+            if hasattr(message, 'entities') and message.entities:
+                hyperlink_urls = self.extract_hyperlink_urls(message)
+
+            # НОВАЯ ЛОГИКА: Комплексный анализ всех источников контрактов
+            logger.debug(f"🧠 Комплексный анализ контрактов...")
+            from utils.addresses import extract_addresses_from_message_data
+            from config.settings import settings
+
+            # Извлекаем адреса из всех источников
+            found_addresses = extract_addresses_from_message_data(
+                message_text=post.content,
+                inline_urls=inline_urls,
+                hyperlink_urls=hyperlink_urls,
+                ai_config=settings.ai
             )
+
+            # Создаем фиктивный analysis_result для совместимости
+            class MockAnalysisResult:
+                def __init__(self, addresses):
+                    self.has_contract = len(addresses) > 0
+                    self.addresses = addresses
+                    self.confidence = 0.9 if addresses else 0.0  # Высокая уверенность если нашли адреса
+                    self.urgency = 'high' if addresses else 'low'
+
+            analysis_result = MockAnalysisResult(found_addresses)
 
             logger.critical(f"📱 TELEGRAM USER: @{post.author_username} в {post.chat_title}")
             logger.critical(
@@ -521,16 +589,62 @@ class UltraFastTelegramUserMonitor:
             self.stats['errors'] += 1
 
     async def extract_media_text(self, message) -> Optional[str]:
-        """Извлечение текста из медиа"""
+        """Извлечение текста из медиа И инлайн кнопок"""
         try:
-            if not message.media:
-                return None
+            extracted_text = ""
 
-            return message.message or ''
+            # Основной текст сообщения
+            if message.message:
+                extracted_text += message.message + " "
+
+            # Извлекаем URL из инлайн кнопок
+            if hasattr(message, 'reply_markup') and message.reply_markup:
+                button_urls = self.extract_inline_button_urls(message.reply_markup)
+                if button_urls:
+                    logger.info(f"🔘 Найдены инлайн кнопки с URL: {button_urls}")
+                    extracted_text += " ".join(button_urls) + " "
+
+            # Извлекаем гиперссылки из entities
+            if hasattr(message, 'entities') and message.entities:
+                hyperlink_urls = self.extract_hyperlink_urls(message)
+                if hyperlink_urls:
+                    logger.info(f"🔗 Найдены гиперссылки: {hyperlink_urls}")
+                    extracted_text += " ".join(hyperlink_urls) + " "
+
+            return extracted_text.strip() if extracted_text.strip() else None
 
         except Exception as e:
-            logger.debug(f"Ошибка извлечения медиа текста: {e}")
+            logger.debug(f"Ошибка извлечения медиа/кнопок: {e}")
             return None
+
+    def extract_inline_button_urls(self, reply_markup) -> List[str]:
+        """Извлечение URL из инлайн кнопок"""
+        urls = []
+        try:
+            if hasattr(reply_markup, 'rows'):
+                for row in reply_markup.rows:
+                    if hasattr(row, 'buttons'):
+                        for button in row.buttons:
+                            if hasattr(button, 'url') and button.url:
+                                urls.append(button.url)
+                                logger.debug(f"🔘 Кнопка URL: {button.url}")
+        except Exception as e:
+            logger.debug(f"Ошибка извлечения кнопок: {e}")
+
+        return urls
+
+    def extract_hyperlink_urls(self, message) -> List[str]:
+        """Извлечение URL из гиперссылок в тексте"""
+        urls = []
+        try:
+            for entity in message.entities:
+                if hasattr(entity, 'url') and entity.url:
+                    urls.append(entity.url)
+                    logger.debug(f"🔗 Гиперссылка: {entity.url}")
+        except Exception as e:
+            logger.debug(f"Ошибка извлечения гиперссылок: {e}")
+
+        return urls
 
     async def trigger_trading(self, analysis_result, post: TelegramUserPost):
         """Запуск торговли"""
