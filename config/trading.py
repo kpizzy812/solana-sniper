@@ -17,6 +17,9 @@ class TradingConfig:
     smart_split: bool = True  # Умное распределение размеров сделок
     max_trade_amount_sol: float = float(os.getenv('MAX_TRADE_AMOUNT_SOL', '1.0'))  # Максимум на одну сделку
 
+    # НОВАЯ НАСТРОЙКА для трат всего баланса
+    use_max_available_balance: bool = os.getenv('USE_MAX_AVAILABLE_BALANCE', 'false').lower() in ['true', '1', 'yes']
+
     @property
     def total_investment(self) -> float:
         """Общая сумма инвестиций за один сигнал"""

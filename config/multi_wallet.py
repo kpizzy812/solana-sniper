@@ -50,6 +50,10 @@ class MultiWalletConfig:
 
     # Основные настройки
     use_multi_wallet: bool = os.getenv('USE_MULTI_WALLET', 'false').lower() in ['true', '1', 'yes']
+
+    # НОВАЯ НАСТРОЙКА для трат всего баланса
+    use_max_available_balance: bool = os.getenv('USE_MAX_AVAILABLE_BALANCE', 'false').lower() in ['true', '1', 'yes']
+
     private_keys_str: str = os.getenv('MULTI_WALLET_PRIVATE_KEYS', '')
     gas_reserve: float = float(os.getenv('WALLET_GAS_RESERVE', '0.02'))
     min_balance: float = float(os.getenv('MIN_WALLET_BALANCE', '0.05'))
@@ -110,6 +114,10 @@ class MultiWalletConfig:
         logger.success(f"✅ Загружено {len(wallets)} кошельков для торговли")
         return wallets
 
+    def is_enabled(self) -> bool:
+        """Проверка, включена ли система множественных кошельков"""
+        return self.use_multi_wallet and len(self.wallets) > 0
+
     def get_available_wallets(self, min_amount: float = 0) -> List[MultiWalletInfo]:
         """Получение доступных кошельков с достаточным балансом"""
         if not self.wallets:
@@ -162,6 +170,47 @@ class MultiWalletConfig:
             # По умолчанию случайный выбор
             return random.choice(available_wallets)
 
+    def get_max_trade_amount_for_wallet(self, wallet: MultiWalletInfo) -> float:
+        """
+        Получить максимальную сумму для торговли с кошелька
+
+        Returns:
+            float: Сумма доступная для торговли (баланс - резерв на газ)
+        """
+        if not self.use_max_available_balance:
+            # Используем стандартную логику
+            try:
+                from config.settings import settings
+                return settings.trading.trade_amount_sol
+            except ImportError:
+                # Fallback если settings недоступны
+                return 0.1
+
+        # Тратим весь доступный баланс
+        max_amount = wallet.available_balance
+
+        # Дополнительная защита
+        try:
+            from config.settings import settings
+            max_allowed = settings.trading.max_trade_amount_sol
+        except ImportError:
+            # Fallback защита
+            max_allowed = 1.0
+
+        return min(max_amount, max_allowed)
+
+    def select_wallet_for_max_trade(self) -> Optional[MultiWalletInfo]:
+        """
+        Выбрать кошелек с максимальным доступным балансом
+        """
+        available_wallets = self.get_available_wallets()
+
+        if not available_wallets:
+            return None
+
+        # Возвращаем кошелек с максимальным доступным балансом
+        return max(available_wallets, key=lambda w: w.available_balance)
+
     def randomize_trade_amount(self, base_amount: float) -> float:
         """
         Рандомизация суммы сделки для маскировки
@@ -206,6 +255,7 @@ class MultiWalletConfig:
 
         return {
             "multi_wallet_enabled": True,
+            "use_max_available_balance": self.use_max_available_balance,
             "total_wallets": len(self.wallets),
             "available_wallets": available_wallets,
             "total_balance_sol": total_balance,
@@ -231,7 +281,3 @@ class MultiWalletConfig:
             for wallet in self.wallets:
                 wallet.trades_count = 0
             logger.info("📊 Счетчик сделок сброшен для всех кошельков")
-
-    def is_enabled(self) -> bool:
-        """Проверка, включена ли система множественных кошельков"""
-        return self.use_multi_wallet and len(self.wallets) > 0

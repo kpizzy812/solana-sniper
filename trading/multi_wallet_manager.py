@@ -138,35 +138,56 @@ class MultiWalletManager:
     def _create_trade_plan(self, base_amount: float, num_trades: int) -> List[Tuple[MultiWalletInfo, float]]:
         """
         Создание плана распределения сделок по кошелькам
-
-        Returns:
-            List[Tuple[MultiWalletInfo, float]]: Список (кошелек, сумма_сделки)
+        ОБНОВЛЕНО: Поддержка трат всего доступного баланса
         """
         trade_plan = []
-        used_wallets = set()
 
-        for i in range(num_trades):
-            # Рандомизируем сумму сделки
-            trade_amount = self.config.randomize_trade_amount(base_amount)
+        if self.config.use_max_available_balance:
+            # НОВАЯ ЛОГИКА: Тратим весь доступный баланс с каждого кошелька
+            logger.critical("💰 РЕЖИМ: Трата всего доступного баланса с кошельков!")
 
-            # Выбираем кошелек для сделки
-            wallet = self.config.select_wallet_for_trade(trade_amount)
+            available_wallets = self.config.get_available_wallets()
 
-            if not wallet:
-                logger.warning(f"⚠️ Не найден подходящий кошелек для сделки {i + 1} на {trade_amount} SOL")
-                continue
+            for wallet in available_wallets:
+                # Получаем максимальную сумму для этого кошелька
+                max_trade_amount = self.config.get_max_trade_amount_for_wallet(wallet)
 
-            # Проверяем не превышен ли лимит для этого кошелька
-            if wallet.address in used_wallets:
-                wallet_usage = sum(1 for w, _ in trade_plan if w.address == wallet.address)
-                if wallet_usage >= self.config.max_trades_per_wallet:
-                    logger.debug(f"⏭️ Кошелек {wallet.address[:8]}... достиг лимита сделок")
+                if max_trade_amount > 0.001:  # Минимум 0.001 SOL для торговли
+                    logger.info(f"📊 Кошелек {wallet.address[:8]}...: {max_trade_amount:.6f} SOL (весь баланс)")
+                    trade_plan.append((wallet, max_trade_amount))
+                else:
+                    logger.debug(f"⏭️ Кошелек {wallet.address[:8]}... пропущен: недостаточно средств")
+
+            logger.critical(f"💎 ИТОГО: {len(trade_plan)} кошельков готовы потратить весь баланс")
+
+        else:
+            # СТАРАЯ ЛОГИКА: Фиксированные суммы сделок
+            logger.info("💰 РЕЖИМ: Фиксированные суммы сделок")
+
+            used_wallets = set()
+
+            for i in range(num_trades):
+                # Рандомизируем сумму сделки
+                trade_amount = self.config.randomize_trade_amount(base_amount)
+
+                # Выбираем кошелек для сделки
+                wallet = self.config.select_wallet_for_trade(trade_amount)
+
+                if not wallet:
+                    logger.warning(f"⚠️ Не найден подходящий кошелек для сделки {i + 1} на {trade_amount} SOL")
                     continue
 
-            trade_plan.append((wallet, trade_amount))
-            used_wallets.add(wallet.address)
+                # Проверяем лимит сделок на кошелек
+                if wallet.address in used_wallets:
+                    wallet_usage = sum(1 for w, _ in trade_plan if w.address == wallet.address)
+                    if wallet_usage >= self.config.max_trades_per_wallet:
+                        logger.debug(f"⏭️ Кошелек {wallet.address[:8]}... достиг лимита сделок")
+                        continue
 
-            logger.debug(f"📝 Сделка {i + 1}: {trade_amount} SOL через {wallet.address[:8]}...")
+                trade_plan.append((wallet, trade_amount))
+                used_wallets.add(wallet.address)
+
+                logger.debug(f"📝 Сделка {i + 1}: {trade_amount} SOL через {wallet.address[:8]}...")
 
         return trade_plan
 

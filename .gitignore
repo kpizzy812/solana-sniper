@@ -12,6 +12,8 @@ extract_key.py
 wallet_key.py
 keypair.json
 *.session
+/wallets
+generated_wallets.json
 
 # Python
 __pycache__/
