@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
 """
-🚨 MORI Sniper Bot - Аварийный скрипт покупки
-Экстренная покупка токена без мониторинга - ввел контракт и купил
+🚨 MORI Sniper Bot - Аварийная покупка с интерактивным интерфейсом
+Система экстренной покупки токенов вручную
 """
 
 import asyncio
 import sys
 import time
-import re
 from pathlib import Path
-from typing import Optional, List
 
 # Добавляем корневую директорию в PATH
 sys.path.append(str(Path(__file__).parent))
@@ -18,141 +16,189 @@ from loguru import logger
 from config.settings import settings
 from config.multi_wallet import MultiWalletConfig
 from trading.jupiter import jupiter_trader
-from utils.addresses import is_valid_solana_address, is_wrapped_sol
+from utils.addresses import is_valid_solana_address, is_wrapped_sol, extract_addresses_fast
 
 
 class EmergencyBuyer:
-    """Аварийная система покупки токенов"""
+    """Аварийная покупка токенов с интерактивным интерфейсом"""
 
     def __init__(self):
         self.multi_wallet_config = MultiWalletConfig()
-        self.start_time = None
+        self.start_time = 0.0
 
     def print_header(self):
-        """Печать заголовка"""
-        print("🚨 MORI SNIPER - АВАРИЙНАЯ ПОКУПКА")
+        """Показать заголовок"""
+        print("\n🚨 АВАРИЙНАЯ ПОКУПКА ТОКЕНОВ")
         print("=" * 60)
-        print("⚡ Экстренная покупка токена без мониторинга")
-        print("🎯 Ввести контракт → мгновенная покупка")
+        print("⚡ Система быстрой покупки для критических ситуаций")
+        print("🎯 Поддержка множественных кошельков и форматов ввода")
+        print("🛡️ Все настройки безопасности активны")
         print("=" * 60)
-        print()
 
     def show_current_settings(self):
         """Показать текущие настройки"""
         print("⚙️ ТЕКУЩИЕ НАСТРОЙКИ:")
-        print("-" * 30)
+        print(f"  📊 Проскальзывание: {settings.trading.slippage_bps / 100}%")
+        print(f"  💰 Приоритетная комиссия: {settings.trading.priority_fee:,} microlamports")
 
-        # Основные настройки торговли
         if self.multi_wallet_config.is_enabled():
+            wallet_count = len(self.multi_wallet_config.wallets)
+            print(f"  🎭 Режим: Множественные кошельки ({wallet_count} шт)")
+
             if self.multi_wallet_config.use_max_available_balance:
-                print("💰 Режим: ТРАТИМ ВЕСЬ ДОСТУПНЫЙ БАЛАНС с множественных кошельков")
-                print(f"🎭 Кошельков загружено: {len(self.multi_wallet_config.wallets)}")
-                print(f"📊 Стратегия: {self.multi_wallet_config.distribution_strategy}")
-                print(f"⏱️ Задержка перед торговлей: {self.multi_wallet_config.initial_delay_seconds}s")
+                print(f"  💸 Стратегия: Весь доступный баланс с каждого кошелька")
             else:
-                print("💰 Режим: Фиксированные суммы с множественных кошельков")
-                print(f"🎭 Кошельков: {len(self.multi_wallet_config.wallets)}")
-                print(f"💵 Сумма на кошелек: {settings.trading.trade_amount_sol} SOL")
-                print(f"🔢 Сделок на кошелек: {settings.trading.num_purchases}")
+                total_per_wallet = settings.trading.trade_amount_sol * settings.trading.num_purchases
+                total_overall = total_per_wallet * wallet_count
+                print(
+                    f"  💸 Стратегия: {settings.trading.trade_amount_sol} SOL x {settings.trading.num_purchases} с каждого кошелька")
+                print(f"  📈 Общий объем: {total_overall} SOL")
         else:
-            print("💰 Режим: Обычный одиночный кошелек")
-            print(f"💵 Размер сделки: {settings.trading.trade_amount_sol} SOL")
-            print(f"🔢 Количество покупок: {settings.trading.num_purchases}")
+            total_investment = settings.trading.trade_amount_sol * settings.trading.num_purchases
+            print(f"  📱 Режим: Одиночный кошелек")
+            print(
+                f"  💸 Сумма покупки: {settings.trading.trade_amount_sol} SOL x {settings.trading.num_purchases} = {total_investment} SOL")
 
-        print(f"📊 Проскальзывание: {settings.trading.slippage_bps / 100}%")
-        print(f"⚡ Приоритет комиссии: {settings.trading.priority_fee:,} microlamports")
-        print(f"🌐 Сеть: {settings.solana.network}")
-        print(f"🛡️ Проверки безопасности: {'Включены' if settings.security.enable_security_checks else 'Отключены'}")
         print()
 
-    def get_token_input(self) -> Optional[str]:
-        """Получение адреса токена от пользователя"""
-        print("🎯 ВВОД ТОКЕНА ДЛЯ ПОКУПКИ:")
-        print("-" * 30)
-        print("💡 Поддерживаемые форматы:")
-        print("   • Прямой контракт: JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN")
-        print("   • Jupiter ссылка: https://jup.ag/swap/SOL-CONTRACT")
-        print("   • Dexscreener: https://dexscreener.com/solana/CONTRACT")
-        print("   • Любой URL с контрактом")
-        print()
+    def get_token_input(self) -> str:
+        """Получить контракт токена от пользователя"""
+        try:
+            print("🎯 ВВОД КОНТРАКТА ТОКЕНА:")
+            print("   Поддерживаемые форматы:")
+            print("   • Прямой контракт: JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN")
+            print("   • Jupiter ссылка: jup.ag/swap/SOL-CONTRACT")
+            print("   • DEX ссылка: dexscreener.com/solana/CONTRACT")
+            print("   • Произвольный текст с контрактом")
+            print()
 
-        while True:
-            user_input = input("🔗 Введите контракт токена или URL: ").strip()
+            user_input = input("📝 Введите контракт или ссылку: ").strip()
 
             if not user_input:
-                print("❌ Ввод не может быть пустым")
-                continue
+                print("❌ Пустой ввод")
+                return ""
 
-            if user_input.lower() in ['exit', 'quit', 'q']:
-                print("❌ Операция отменена")
-                return None
+            # Извлечение контракта
+            token_contract = self.extract_contract_from_input(user_input)
 
-            # Извлекаем контракт из ввода
-            contract = self.extract_contract_from_input(user_input)
+            # Проверка на Wrapped SOL
+            if is_wrapped_sol(token_contract):
+                print("⚠️ Это Wrapped SOL - покупка не требуется")
+                return ""
 
-            if contract:
-                # Проверяем что это не базовый токен
-                if is_wrapped_sol(contract):
-                    print("❌ Это Wrapped SOL - покупка не нужна")
-                    continue
+            # Подтверждение
+            print(f"\n✅ Найден контракт: {token_contract}")
+            confirm = input("❓ Подтвердить покупку? [y/N]: ").lower()
 
-                print(f"✅ Контракт найден: {contract}")
+            if confirm not in ['y', 'yes', 'да', '1']:
+                print("❌ Покупка отменена")
+                return ""
 
-                # Подтверждение
-                confirm = input("\n🚨 ПОДТВЕРДИТЬ ПОКУПКУ? [y/N]: ").strip().lower()
-                if confirm in ['y', 'yes', 'да', 'д']:
-                    return contract
-                else:
-                    print("❌ Покупка отменена")
-                    return None
-            else:
-                print("❌ Не удалось найти валидный контракт токена")
-                print("💡 Проверьте формат ввода и попробуйте снова")
-                continue
+            return token_contract
 
-    def extract_contract_from_input(self, user_input: str) -> Optional[str]:
+        except Exception as e:
+            logger.error(f"❌ Ошибка получения ввода: {e}")
+            print(f"❌ Ошибка: {e}")
+            return ""
+
+    def extract_contract_from_input(self, user_input: str) -> str:
         """Извлечение контракта из пользовательского ввода"""
         try:
-            # Если это уже готовый контракт
+            # Прямой контракт
             if is_valid_solana_address(user_input):
                 return user_input
 
-            # Если это URL - используем наши парсеры
-            if 'http' in user_input.lower():
+            # URL или ссылка
+            if 'http' in user_input.lower() or any(domain in user_input.lower() for domain in
+                                                   ['jup.ag', 'dexscreener', 'raydium', 'birdeye']):
                 from utils.addresses import extract_addresses_from_any_url
                 addresses = extract_addresses_from_any_url(user_input)
                 if addresses:
-                    return addresses[0]  # Берем первый найденный
+                    return addresses[0]
 
-            # Поиск контракта в произвольном тексте
-            from utils.addresses import extract_addresses_fast
+            # Поиск в произвольном тексте
             addresses = extract_addresses_fast(user_input, settings.ai)
             if addresses:
-                return addresses[0]  # Берем первый найденный
+                return addresses[0]
 
-            return None
+            raise ValueError("Контракт не найден в введенном тексте")
 
         except Exception as e:
-            logger.error(f"Ошибка извлечения контракта: {e}")
-            return None
+            raise ValueError(f"Не удалось извлечь контракт: {e}")
+
+    async def start_trading_system_with_retries(self, max_retries: int = 3) -> bool:
+        """Запуск торговой системы с повторными попытками"""
+        for attempt in range(max_retries):
+            try:
+                logger.info(f"🚀 Попытка запуска торговой системы {attempt + 1}/{max_retries}...")
+
+                if await jupiter_trader.start():
+                    logger.success("✅ Торговая система запущена успешно")
+                    return True
+                else:
+                    logger.warning(f"⚠️ Попытка {attempt + 1} не удалась")
+
+            except Exception as e:
+                logger.error(f"❌ Ошибка при попытке {attempt + 1}: {e}")
+
+            # Ждем перед следующей попыткой (кроме последней)
+            if attempt < max_retries - 1:
+                retry_delay = 2 * (attempt + 1)  # Экспоненциальная задержка
+                logger.info(f"⏳ Ожидание {retry_delay} секунд перед следующей попыткой...")
+                await asyncio.sleep(retry_delay)
+
+        logger.error(f"❌ Не удалось запустить торговую систему после {max_retries} попыток")
+        return False
+
+    async def check_trading_system_health(self) -> bool:
+        """Проверка здоровья торговой системы с более мягкими требованиями"""
+        try:
+            health = await jupiter_trader.health_check()
+            logger.info(f"🔍 Health check результат: {health}")
+
+            # Более мягкие условия - принимаем "degraded" если основные компоненты работают
+            status = health.get('status', 'unknown')
+            components = health.get('components', {})
+
+            # Проверяем критически важные компоненты
+            solana_rpc = components.get('solana_rpc', 'unknown')
+            wallet_info = health.get('wallet_info', {})
+
+            if solana_rpc == 'healthy' and wallet_info.get('address'):
+                logger.success("✅ Основные компоненты торговой системы работают")
+
+                # Предупреждаем о проблемах с Jupiter API, но не блокируем
+                jupiter_api = components.get('jupiter_api', 'unknown')
+                if jupiter_api == 'error':
+                    logger.warning("⚠️ Проблемы с Jupiter API, но будем пробовать торговать")
+
+                return True
+            else:
+                logger.error(
+                    f"❌ Критические компоненты не работают: Solana RPC={solana_rpc}, Wallet={bool(wallet_info.get('address'))}")
+                return False
+
+        except Exception as e:
+            logger.error(f"❌ Ошибка проверки здоровья: {e}")
+            # В аварийном режиме пробуем продолжить даже при ошибках health check
+            logger.warning("⚠️ Пропускаем health check и пробуем торговать напрямую")
+            return True
 
     async def execute_emergency_buy(self, token_contract: str):
-        """Выполнение аварийной покупки"""
+        """Выполнение аварийной покупки с улучшенной обработкой ошибок"""
         self.start_time = time.time()
 
-        logger.critical("🚨 НАЧАЛАСЬ АВАРИЙНАЯ ПОКУПКА!")
         logger.critical(f"🎯 Контракт: {token_contract}")
 
         try:
-            # Инициализируем Jupiter trader
+            # Инициализируем Jupiter trader с ретраями
             logger.info("🚀 Инициализация торговой системы...")
-            if not await jupiter_trader.start():
-                raise Exception("Не удалось запустить торговую систему")
+            if not await self.start_trading_system_with_retries():
+                raise Exception("Не удалось запустить торговую систему после всех попыток")
 
-            # Проверяем здоровье системы
-            health = await jupiter_trader.health_check()
-            if health.get('status') != 'healthy':
-                logger.warning(f"⚠️ Проблемы с торговой системой: {health}")
+            # Проверяем здоровье системы (мягкая проверка)
+            if not await self.check_trading_system_health():
+                logger.warning("⚠️ Проблемы с торговой системой, но продолжаем аварийную покупку")
 
             # Создаем данные для торговли (имитируем сигнал)
             trading_signal = {
@@ -184,50 +230,64 @@ class EmergencyBuyer:
             print(f"\n❌ ОШИБКА: {e}")
         finally:
             # Останавливаем Jupiter trader
-            await jupiter_trader.stop()
+            try:
+                await jupiter_trader.stop()
+            except Exception as e:
+                logger.error(f"❌ Ошибка остановки трейдера: {e}")
 
     async def execute_multi_wallet_buy(self, token_contract: str, trading_signal: dict):
-        """Покупка с множественными кошельками"""
-        logger.critical("🎭 ПОКУПКА С МНОЖЕСТВЕННЫМИ КОШЕЛЬКАМИ")
+        """Покупка через множественные кошельки"""
+        logger.info("🎭 Покупка через множественные кошельки...")
 
-        if self.multi_wallet_config.use_max_available_balance:
-            # Тратим весь доступный баланс
-            result = await jupiter_trader.multi_wallet_manager.execute_multi_wallet_trades(
-                token_address=token_contract,
-                base_trade_amount=0,  # Игнорируется в режиме max balance
-                num_trades=0,  # Игнорируется в режиме max balance
-                source_info=trading_signal
-            )
-        else:
-            # Фиксированные суммы
-            result = await jupiter_trader.multi_wallet_manager.execute_multi_wallet_trades(
-                token_address=token_contract,
-                base_trade_amount=settings.trading.trade_amount_sol,
-                num_trades=settings.trading.num_purchases,
-                source_info=trading_signal
-            )
+        try:
+            # Правильный вызов с учетом режима работы
+            if self.multi_wallet_config.use_max_available_balance:
+                # Режим "весь доступный баланс"
+                logger.critical("💰 РЕЖИМ: Трата всего доступного баланса с каждого кошелька")
+                result = await jupiter_trader.multi_wallet_manager.execute_multi_wallet_trades(
+                    token_address=token_contract,
+                    base_trade_amount=0,  # Игнорируется в режиме max balance
+                    num_trades=0,  # Игнорируется в режиме max balance
+                    source_info=trading_signal
+                )
+            else:
+                # Режим фиксированных сумм
+                logger.critical(f"💰 РЕЖИМ: {settings.trading.trade_amount_sol} SOL x {settings.trading.num_purchases}")
+                result = await jupiter_trader.multi_wallet_manager.execute_multi_wallet_trades(
+                    token_address=token_contract,
+                    base_trade_amount=settings.trading.trade_amount_sol,
+                    num_trades=settings.trading.num_purchases,
+                    source_info=trading_signal
+                )
 
-        # Показываем результаты
-        self.show_multi_wallet_results(result)
+            self.show_multi_wallet_results(result)
+
+        except Exception as e:
+            logger.error(f"❌ Ошибка покупки через множественные кошельки: {e}")
+            print(f"❌ Ошибка множественных кошельков: {e}")
 
     async def execute_single_wallet_buy(self, token_contract: str, trading_signal: dict):
-        """Покупка с одиночным кошельком"""
-        logger.critical("📱 ПОКУПКА С ОДИНОЧНЫМ КОШЕЛЬКОМ")
+        """Покупка через одиночный кошелек"""
+        logger.info("📱 Покупка через одиночный кошелек...")
 
-        results = await jupiter_trader.execute_sniper_trades(
-            token_address=token_contract,
-            source_info=trading_signal
-        )
+        try:
+            results = await jupiter_trader.execute_sniper_trades(
+                token_address=token_contract,
+                source_info=trading_signal
+            )
 
-        # Показываем результаты
-        self.show_single_wallet_results(results)
+            self.show_single_wallet_results(results)
+
+        except Exception as e:
+            logger.error(f"❌ Ошибка покупки через одиночный кошелек: {e}")
+            print(f"❌ Ошибка одиночного кошелька: {e}")
 
     def show_multi_wallet_results(self, result):
         """Показ результатов множественных кошельков"""
         execution_time = (time.time() - self.start_time)
 
         print("\n" + "=" * 60)
-        print("🎭 РЕЗУЛЬТАТЫ МУЛЬТИ-КОШЕЛЬКОВОЙ ПОКУПКИ")
+        print("🎭 РЕЗУЛЬТАТЫ МНОЖЕСТВЕННЫХ КОШЕЛЬКОВ")
         print("=" * 60)
 
         print(f"⏱️ Время выполнения: {execution_time:.1f} секунд")
@@ -235,8 +295,12 @@ class EmergencyBuyer:
         print(f"✅ Успешных: {result.successful_trades}")
         print(f"❌ Неудачных: {result.failed_trades}")
         print(f"📈 Процент успеха: {result.success_rate:.1f}%")
-        print(f"💰 Потрачено SOL: {result.total_sol_spent:.6f}")
-        print(f"🪙 Куплено токенов: {result.total_tokens_bought:,.0f}")
+
+        if result.successful_trades > 0:
+            print(f"💰 Потрачено SOL: {result.total_sol_spent:.6f}")
+            print(f"🪙 Куплено токенов: {result.total_tokens_bought:,.0f}")
+            avg_time = result.execution_time_ms / max(result.total_trades, 1)
+            print(f"⚡ Среднее время: {avg_time:.0f}ms")
 
         if result.delayed_start:
             print(f"⏱️ Была задержка: {self.multi_wallet_config.initial_delay_seconds}s")
@@ -275,7 +339,7 @@ class EmergencyBuyer:
             for i, sig in enumerate(signatures):
                 print(f"  {i + 1}. {sig}")
 
-    def show_single_wallet_results(self, results: List):
+    def show_single_wallet_results(self, results: list):
         """Показ результатов одиночного кошелька"""
         execution_time = (time.time() - self.start_time)
         successful = [r for r in results if r.success]

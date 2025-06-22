@@ -103,44 +103,83 @@ class TransferManager:
             return 0.0
 
     async def get_token_balance(self, wallet_pubkey: Pubkey, token_mint: Pubkey) -> float:
-        """Получает баланс токена кошелька"""
+        """Получает баланс токена кошелька - ПРАВИЛЬНАЯ ВЕРСИЯ"""
         try:
-            response = await self.client.get_token_accounts_by_owner(
-                wallet_pubkey,
-                {"mint": token_mint},
-                commitment=Confirmed
-            )
+            # Способ 1: Через Associated Token Account (самый надежный)
+            from spl.token.instructions import get_associated_token_address
 
-            if not response.value:
-                return 0.0
+            # Получаем ATA адрес
+            ata_address = get_associated_token_address(wallet_pubkey, token_mint)
 
-            # Берем первый токен аккаунт и извлекаем баланс
-            token_account = response.value[0]
-
-            # Получаем детальную информацию об аккаунте
-            account_info = await self.client.get_account_info(
-                token_account.pubkey,
-                commitment=Confirmed
-            )
+            # Проверяем существование ATA
+            account_info = await self.client.get_account_info(ata_address, commitment=Confirmed)
 
             if not account_info.value:
+                logger.debug(f"📊 ATA не существует для {str(wallet_pubkey)[:8]}...")
                 return 0.0
 
-            # Парсим баланс из account data (первые 8 байт после 32 байт owner)
+            # Парсим данные аккаунта токена вручную
             data = account_info.value.data
-            if len(data) < 40:
+
+            if len(data) < 64:
+                logger.debug(f"📊 Недостаточно данных в ATA")
                 return 0.0
 
-            # Баланс в формате little-endian uint64 на позиции 64-72 в account data
-            balance_bytes = data[64:72]
-            balance = int.from_bytes(balance_bytes, byteorder='little')
+            # SPL Token Account layout:
+            # 0-32: mint (32 bytes)
+            # 32-64: owner (32 bytes)
+            # 64-72: amount (8 bytes, little-endian uint64)
+            # 72-73: delegate option (1 byte)
+            # 73-74: state (1 byte)
+            # etc...
 
-            # Предполагаем 9 decimals (стандарт для большинства токенов)
-            return balance / (10 ** 9)
+            # Извлекаем amount (позиция 64-72)
+            amount_bytes = data[64:72]
+            amount_raw = int.from_bytes(amount_bytes, byteorder='little')
+
+            if amount_raw == 0:
+                return 0.0
+
+            # Получаем decimals для токена
+            decimals = await self.get_token_decimals(token_mint)
+
+            # Вычисляем реальный баланс
+            balance = amount_raw / (10 ** decimals)
+
+            logger.debug(f"💰 Баланс {str(wallet_pubkey)[:8]}...: {balance:.6f} токенов")
+            return balance
 
         except Exception as e:
             logger.error(f"❌ Ошибка получения баланса токена: {e}")
             return 0.0
+
+    async def get_token_decimals(self, token_mint: Pubkey) -> int:
+        """Получает количество decimals для токена"""
+        try:
+            # Получаем информацию о mint аккаунте
+            mint_info = await self.client.get_account_info(token_mint, commitment=Confirmed)
+
+            if not mint_info.value:
+                logger.debug(f"📊 Mint аккаунт не найден, используем 6 decimals по умолчанию")
+                return 6  # Стандартное значение
+
+            data = mint_info.value.data
+
+            if len(data) < 44:
+                return 6
+
+            # SPL Token Mint layout:
+            # 0-4: mint_authority option (4 bytes)
+            # 4-8: supply (8 bytes)
+            # 36: decimals (1 byte)
+            decimals = data[44]  # decimals на позиции 44
+
+            logger.debug(f"💰 Decimals для токена: {decimals}")
+            return decimals
+
+        except Exception as e:
+            logger.debug(f"❌ Ошибка получения decimals: {e}, используем 6")
+            return 6  # Fallback на стандартное значение
 
     async def transfer_sol(self, from_keypair: Keypair, to_pubkey: Pubkey, amount_sol: float) -> Dict:
         """Переводит SOL между кошельками"""
@@ -204,38 +243,37 @@ class TransferManager:
 
     async def transfer_token(self, from_keypair: Keypair, to_pubkey: Pubkey,
                              token_mint: Pubkey, amount: float) -> Dict:
-        """Переводит SPL токены между кошельками"""
+        """Переводит SPL токены между кошельками - ИСПРАВЛЕННАЯ ВЕРСИЯ"""
         try:
-            # Для токенов используем программу Token Program
-            from solders.token.state import AccountState
-            from solders.token.instruction import transfer_checked, TransferCheckedParams
-            from solders.token.instruction import create_associated_token_account
-            from solana.constants import SYSTEM_PROGRAM_ID
+            # Правильные импорты
+            from spl.token.instructions import (
+                transfer_checked,
+                TransferCheckedParams,
+                create_associated_token_account
+            )
             from spl.token.constants import TOKEN_PROGRAM_ID, ASSOCIATED_TOKEN_PROGRAM_ID
+            from spl.token.instructions import get_associated_token_address
 
-            # Получаем associated token accounts
-            from spl.token._layouts import ACCOUNT_LAYOUT
-            from spl.token.core import _get_associated_token_address
+            from_ata = get_associated_token_address(from_keypair.pubkey(), token_mint)
+            to_ata = get_associated_token_address(to_pubkey, token_mint)
 
-            from_ata = _get_associated_token_address(from_keypair.pubkey(), token_mint)
-            to_ata = _get_associated_token_address(to_pubkey, token_mint)
-
-            # Проверяем существование target ATA и создаем если нужно
             instructions = []
 
-            # Проверяем target account
+            # Проверяем существование target ATA и создаем если нужно
             to_account_info = await self.client.get_account_info(to_ata, commitment=Confirmed)
             if not to_account_info.value:
-                # Создаем ATA для получателя
+                # ИСПРАВЛЕНО: Правильные параметры для create_associated_token_account
                 create_ata_ix = create_associated_token_account(
                     payer=from_keypair.pubkey(),
                     owner=to_pubkey,
-                    mint=token_mint
+                    mint=token_mint,
+                    token_program_id=TOKEN_PROGRAM_ID,
+                    associated_token_program_id=ASSOCIATED_TOKEN_PROGRAM_ID
                 )
                 instructions.append(create_ata_ix)
 
-            # Конвертируем amount с учетом decimals (предполагаем 9)
-            decimals = 9
+            # Получаем правильное количество decimals
+            decimals = await self.get_token_decimals(token_mint)
             amount_with_decimals = int(amount * (10 ** decimals))
 
             # Создаем инструкцию перевода токена
