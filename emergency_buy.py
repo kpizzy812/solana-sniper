@@ -185,32 +185,22 @@ class EmergencyBuyer:
             return True
 
     async def execute_emergency_buy(self, token_contract: str):
-        """Выполнение аварийной покупки с улучшенной обработкой ошибок"""
-        self.start_time = time.time()
+        """Выполнение аварийной покупки с правильным подсчетом токенов"""
+        print(f"\n🎯 НАЧИНАЕМ ПОКУПКУ: {token_contract}")
+        print("=" * 60)
 
-        logger.critical(f"🎯 Контракт: {token_contract}")
+        # Инициализируем Jupiter
+        await jupiter_trader.start()
 
         try:
-            # Инициализируем Jupiter trader с ретраями
-            logger.info("🚀 Инициализация торговой системы...")
-            if not await self.start_trading_system_with_retries():
-                raise Exception("Не удалось запустить торговую систему после всех попыток")
+            start_time = time.time()
 
-            # Проверяем здоровье системы (мягкая проверка)
-            if not await self.check_trading_system_health():
-                logger.warning("⚠️ Проблемы с торговой системой, но продолжаем аварийную покупку")
-
-            # Создаем данные для торговли (имитируем сигнал)
+            # Создаем сигнал для торговли
             trading_signal = {
-                'platform': 'emergency_manual',
-                'source': 'Аварийная покупка',
-                'author': 'Manual Input',
-                'url': 'manual://emergency',
-                'contracts': [token_contract],
-                'confidence': 1.0,  # Максимальная уверенность для ручного ввода
-                'urgency': 'high',
+                'platform': 'emergency',
+                'source': 'manual_input',
                 'timestamp': time.time(),
-                'content_preview': f"Аварийная покупка токена {token_contract}",
+                'content_preview': f"Аварийная покупка {token_contract}",
                 'emergency': True
             }
 
@@ -219,21 +209,87 @@ class EmergencyBuyer:
                     jupiter_trader.multi_wallet_manager and
                     self.multi_wallet_config.is_enabled()):
 
-                # Множественные кошельки
-                await self.execute_multi_wallet_buy(token_contract, trading_signal)
-            else:
-                # Обычная покупка
-                await self.execute_single_wallet_buy(token_contract, trading_signal)
+                print("🎭 Режим: Множественные кошельки")
 
-        except Exception as e:
-            logger.error(f"❌ Критическая ошибка аварийной покупки: {e}")
-            print(f"\n❌ ОШИБКА: {e}")
+                if self.multi_wallet_config.use_max_available_balance:
+                    result = await jupiter_trader.multi_wallet_manager.execute_multi_wallet_trades(
+                        token_address=token_contract,
+                        base_trade_amount=0,
+                        num_trades=0,
+                        source_info=trading_signal
+                    )
+                else:
+                    result = await jupiter_trader.multi_wallet_manager.execute_multi_wallet_trades(
+                        token_address=token_contract,
+                        base_trade_amount=settings.trading.trade_amount_sol,
+                        num_trades=settings.trading.num_purchases,
+                        source_info=trading_signal
+                    )
+
+                # ИСПРАВЛЕНО: Детальные результаты с правильным подсчетом токенов
+                print(f"\n🎉 ПОКУПКА ЗАВЕРШЕНА!")
+                print("=" * 60)
+                print(f"✅ Успешных сделок: {result.successful_trades}/{result.total_trades}")
+                print(f"💰 Потрачено SOL: {result.total_sol_spent:.6f}")
+                print(f"🪙 Куплено токенов: {result.total_tokens_bought:,.6f}")  # Уже исправлено в manager
+                print(f"⏱️ Общее время: {(time.time() - start_time):.1f}s")
+                print(f"📊 Скорость: {result.execution_time_ms:.0f}ms")
+
+                # Показываем результаты по кошелькам
+                print(f"\n📋 ДЕТАЛИ ПО КОШЕЛЬКАМ:")
+                print("-" * 60)
+
+                successful_wallets = 0
+                for wallet_addr, trade_result in result.wallet_results:
+                    status = "✅" if trade_result.success else "❌"
+                    print(f"{status} {wallet_addr[:8]}...{wallet_addr[-8:]}")
+
+                    if trade_result.success:
+                        successful_wallets += 1
+                        print(f"   💰 Потрачено: {trade_result.input_amount:.6f} SOL")
+                        if trade_result.output_amount:
+                            print(f"   🪙 Получено: {trade_result.output_amount:,.6f} токенов")
+                        if trade_result.signature:
+                            print(f"   📝 Подпись: {trade_result.signature}")
+                    else:
+                        print(f"   ❌ Ошибка: {trade_result.error}")
+                    print()
+
+            else:
+                print("📱 Режим: Одиночный кошелек")
+
+                results = await jupiter_trader.execute_sniper_trades(
+                    token_address=token_contract,
+                    source_info=trading_signal
+                )
+
+                successful = [r for r in results if r.success]
+
+                print(f"\n🎉 ПОКУПКА ЗАВЕРШЕНА!")
+                print("=" * 60)
+                print(f"✅ Успешных сделок: {len(successful)}/{len(results)}")
+
+                if successful:
+                    total_sol = sum(r.input_amount for r in successful)
+                    total_tokens = sum(r.output_amount or 0 for r in successful)  # Уже исправлено в executor
+                    print(f"💰 Потрачено SOL: {total_sol:.6f}")
+                    print(f"🪙 Куплено токенов: {total_tokens:,.6f}")
+                    print(f"⏱️ Общее время: {(time.time() - start_time):.1f}s")
+
+                    print(f"\n📋 ДЕТАЛИ СДЕЛОК:")
+                    print("-" * 60)
+
+                    for i, result in enumerate(successful):
+                        print(f"✅ Сделка {i + 1}:")
+                        print(f"   💰 Потрачено: {result.input_amount:.6f} SOL")
+                        if result.output_amount:
+                            print(f"   🪙 Получено: {result.output_amount:,.6f} токенов")
+                        if result.signature:
+                            print(f"   📝 Подпись: {result.signature}")
+                        print()
+
         finally:
-            # Останавливаем Jupiter trader
-            try:
-                await jupiter_trader.stop()
-            except Exception as e:
-                logger.error(f"❌ Ошибка остановки трейдера: {e}")
+            await jupiter_trader.stop()
 
     async def execute_multi_wallet_buy(self, token_contract: str, trading_signal: dict):
         """Покупка через множественные кошельки"""

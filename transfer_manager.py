@@ -336,8 +336,14 @@ class TransferManager:
                 'to_wallet': str(to_pubkey)
             }
 
-    async def distribute_sol(self) -> List[Dict]:
-        """Распределяет SOL с основного кошелька по мульти-кошелькам"""
+    async def distribute_sol(self, custom_amounts: List[float] = None) -> List[Dict]:
+        """
+        Распределяет SOL с основного кошелька по мульти-кошелькам
+
+        Args:
+            custom_amounts: Список конкретных сумм для каждого кошелька (в SOL).
+                          Если None - распределяет поровну весь доступный баланс
+        """
         if not self.multi_wallets:
             logger.error("❌ Мульти-кошельки не настроены!")
             return []
@@ -346,14 +352,62 @@ class TransferManager:
 
         # Получаем баланс основного кошелька
         main_balance = await self.get_sol_balance(self.main_keypair.pubkey())
-
-        # Рассчитываем доступную сумму (минус резерв на газ)
         gas_reserve = self.multi_config.gas_reserve
         available_balance = main_balance - gas_reserve
 
         if available_balance <= 0:
-            logger.warning(f"⚠️ Недостаточно SOL для перевода. Баланс: {main_balance:.4f}, резерв: {gas_reserve}")
+            logger.warning(f"⚠️ Недостаточно SOL для распределения. Баланс: {main_balance:.4f}, резерв: {gas_reserve}")
             return results
+
+        num_wallets = len(self.multi_wallets)
+
+        # Если указаны конкретные суммы
+        if custom_amounts is not None:
+            if len(custom_amounts) != num_wallets:
+                logger.error(
+                    f"❌ Количество сумм ({len(custom_amounts)}) не совпадает с количеством кошельков ({num_wallets})")
+                return results
+
+            total_needed = sum(custom_amounts)
+            if total_needed > available_balance:
+                logger.error(f"❌ Запрошено {total_needed:.4f} SOL, доступно {available_balance:.4f} SOL")
+                return results
+
+            amounts = custom_amounts
+            logger.info(f"💰 Распределяем по указанным суммам: {total_needed:.4f} SOL на {num_wallets} кошельков")
+            for i, amount in enumerate(amounts):
+                logger.info(f"💳 Кошелек {i + 1}: {amount:.4f} SOL")
+
+        else:
+            # Стандартная логика - поровну
+            amount_per_wallet = available_balance / num_wallets
+            amounts = [amount_per_wallet] * num_wallets
+            logger.info(f"💰 Распределяем поровну {available_balance:.4f} SOL на {num_wallets} кошельков")
+            logger.info(f"💳 По {amount_per_wallet:.4f} SOL на кошелек")
+
+        # Переводим на каждый кошелек
+        for i, (wallet, amount) in enumerate(zip(self.multi_wallets, amounts)):
+            if amount <= 0:
+                logger.info(f"⏭️ Кошелек {i + 1}: пропускаем (сумма {amount:.4f} SOL)")
+                continue
+
+            logger.info(f"📤 Перевод {i + 1}/{num_wallets}: {amount:.4f} SOL → {str(wallet.pubkey())[:8]}...")
+
+            result = await self.transfer_sol(
+                self.main_keypair,
+                wallet.pubkey(),
+                amount
+            )
+
+            results.append(result)
+
+            if not result['success']:
+                logger.error(f"❌ Ошибка: {result.get('error', 'Unknown error')}")
+
+            # Небольшая задержка между переводами
+            await asyncio.sleep(1)
+
+        return results
 
     async def transfer_to_manual_wallets_sol(self) -> List[Dict]:
         """Собирает SOL с мульти-кошельков и переводит на ручные кошельки"""
@@ -797,10 +851,81 @@ async def main():
             if not manager.multi_wallets:
                 print("❌ Мульти-кошельки не настроены!")
                 continue
-            print("\n📤 Распределение SOL по мульти-кошелькам...")
-            results = await manager.distribute_sol()
 
-            success_count = sum(1 for r in results if r['success'])
+            print("\n📤 Распределение SOL по мульти-кошелькам")
+            print("=" * 50)
+            print("Выберите способ распределения:")
+            print("1. ⚖️ Поровну между всеми кошельками")
+            print("2. 💰 Указать конкретные суммы для каждого")
+
+            mode = input("👉 Ваш выбор: ").strip()
+
+            if mode == "1":
+                # Поровну
+                print("\n📤 Распределение поровну...")
+                results = await manager.distribute_sol()
+
+            elif mode == "2":
+                # Конкретные суммы
+                num_wallets = len(manager.multi_wallets)
+                print(f"\n💰 Укажите суммы для {num_wallets} кошельков:")
+
+                # Показываем доступный баланс
+                main_balance = await manager.get_sol_balance(manager.main_keypair.pubkey())
+                available = main_balance - manager.multi_config.gas_reserve
+                print(f"💳 Доступно для распределения: {available:.4f} SOL")
+
+                custom_amounts = []
+                total_requested = 0.0
+
+                for i in range(num_wallets):
+                    while True:
+                        try:
+                            amount_str = input(f"💳 Кошелек {i + 1} (SOL): ").strip()
+                            if not amount_str:
+                                amount = 0.0
+                            else:
+                                amount = float(amount_str)
+
+                            if amount < 0:
+                                print("❌ Сумма не может быть отрицательной!")
+                                continue
+
+                            custom_amounts.append(amount)
+                            total_requested += amount
+                            break
+                        except ValueError:
+                            print("❌ Введите корректную сумму!")
+
+                print(f"\n📊 Всего запрошено: {total_requested:.4f} SOL")
+                print(f"💳 Доступно: {available:.4f} SOL")
+
+                if total_requested > available:
+                    print("❌ Запрошенная сумма превышает доступную!")
+                    continue
+
+                # Подтверждение
+                print("\n🔍 Распределение:")
+                for i, amount in enumerate(custom_amounts):
+                    if amount > 0:
+                        print(f"💳 Кошелек {i + 1}: {amount:.4f} SOL")
+
+                confirm = input("\n✅ Подтвердить распределение? (y/n): ").strip().lower()
+                if confirm not in ['y', 'yes', 'да']:
+                    print("❌ Отменено!")
+                    continue
+
+                print("\n📤 Распределение по указанным суммам...")
+                results = await manager.distribute_sol(custom_amounts)
+            else:
+                print("❌ Неверный выбор!")
+                continue
+
+            if results is not None:
+                success_count = sum(1 for r in results if r['success'])
+            else:
+                success_count = 0
+                print("❌ Функция вернула None!")
             print(f"\n📊 Результат: {success_count}/{len(results)} успешных переводов")
 
         elif choice == "2":

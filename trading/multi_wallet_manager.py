@@ -194,18 +194,24 @@ class MultiWalletManager:
     async def _execute_trade_plan(self, token_address: str,
                                   trade_plan: List[Tuple[MultiWalletInfo, float]],
                                   source_info: Dict) -> List[Tuple[str, TradeResult]]:
-        """Выполнение плана торговли"""
+        """Выполнение плана торговли - ИСПРАВЛЕННАЯ ВЕРСИЯ"""
+        from solders.pubkey import Pubkey
+
         wallet_results = []
+        token_mint = Pubkey.from_string(token_address)
 
         for i, (wallet, amount) in enumerate(trade_plan):
             try:
                 logger.info(f"🔄 Сделка {i + 1}/{len(trade_plan)}: {amount} SOL через {wallet.address[:8]}...")
 
+                # НОВОЕ: Получаем баланс токенов ДО покупки для данного кошелька
+                balance_before = await self._get_token_balance_with_decimals(wallet.keypair.pubkey(), token_mint)
+
                 # Временно заменяем кошелек в Jupiter trader
                 original_keypair = self.jupiter_trader.executor.wallet_keypair
                 self.jupiter_trader.executor.wallet_keypair = wallet.keypair
 
-                # Выполняем одну сделку
+                # Выполняем одну сделку (используем обычную функцию, так как фикс уже в executor)
                 results = await self.jupiter_trader.executor._execute_single_trade(
                     token_address=token_address,
                     trade_index=i,
@@ -215,6 +221,22 @@ class MultiWalletManager:
 
                 # Восстанавливаем оригинальный кошелек
                 self.jupiter_trader.executor.wallet_keypair = original_keypair
+
+                # ИСПРАВЛЕНО: Если сделка успешна, но нет данных о токенах, получаем их сами
+                if results.success and (not results.output_amount or results.output_amount <= 0):
+                    # Ждем подтверждения транзакции
+                    await asyncio.sleep(2)
+
+                    # Получаем баланс ПОСЛЕ покупки
+                    balance_after = await self._get_token_balance_with_decimals(wallet.keypair.pubkey(), token_mint)
+
+                    # Вычисляем реально купленное количество
+                    actual_tokens_bought = balance_after - balance_before
+
+                    # Обновляем результат с правильным количеством токенов
+                    results.output_amount = actual_tokens_bought
+
+                    logger.info(f"🪙 Кошелек {wallet.address[:8]}... купил: {actual_tokens_bought:,.6f} токенов")
 
                 # Обновляем информацию о кошельке
                 if results.success:
@@ -247,6 +269,80 @@ class MultiWalletManager:
 
         return wallet_results
 
+    # НОВАЯ ФУНКЦИЯ: добавить в класс MultiWalletManager
+    async def _get_token_balance_with_decimals(self, wallet_pubkey, token_mint) -> float:
+        """Получает баланс токенов с правильным учетом decimals - КОПИЯ ИЗ TRANSFER_MANAGER"""
+        try:
+            from spl.token.instructions import get_associated_token_address
+            from solana.rpc.commitment import Confirmed
+            from solders.pubkey import Pubkey
+
+            # Получаем associated token account
+            ata = get_associated_token_address(wallet_pubkey, token_mint)
+
+            # Получаем информацию об аккаунте
+            account_info = await self.jupiter_trader.executor.solana_client.get_account_info(ata, commitment=Confirmed)
+
+            if not account_info.value:
+                logger.debug(f"💰 ATA не найден для {str(wallet_pubkey)[:8]}...")
+                return 0.0
+
+            data = account_info.value.data
+
+            if len(data) < 72:
+                logger.debug(f"💰 Некорректные данные ATA для {str(wallet_pubkey)[:8]}...")
+                return 0.0
+
+            # SPL Token Account layout:
+            # 64-72: amount (8 bytes little-endian uint64)
+            amount_bytes = data[64:72]
+            amount_raw = int.from_bytes(amount_bytes, byteorder='little')
+
+            if amount_raw == 0:
+                return 0.0
+
+            # Получаем decimals для токена
+            decimals = await self._get_token_decimals(token_mint)
+
+            # Вычисляем реальный баланс
+            balance = amount_raw / (10 ** decimals)
+
+            logger.debug(f"💰 Баланс {str(wallet_pubkey)[:8]}...: {balance:.6f} токенов")
+            return balance
+
+        except Exception as e:
+            logger.error(f"❌ Ошибка получения баланса токена: {e}")
+            return 0.0
+
+    # НОВАЯ ФУНКЦИЯ: добавить в класс MultiWalletManager
+    async def _get_token_decimals(self, token_mint) -> int:
+        """Получает количество decimals для токена - КОПИЯ ИЗ TRANSFER_MANAGER"""
+        try:
+            from solana.rpc.commitment import Confirmed
+
+            # Получаем информацию о mint аккаунте
+            mint_info = await self.jupiter_trader.executor.solana_client.get_account_info(token_mint,
+                                                                                          commitment=Confirmed)
+
+            if not mint_info.value:
+                logger.debug(f"📊 Mint аккаунт не найден, используем 6 decimals по умолчанию")
+                return 6
+
+            data = mint_info.value.data
+
+            if len(data) < 44:
+                return 6
+
+            # SPL Token Mint layout: decimals на позиции 44
+            decimals = data[44]
+
+            logger.debug(f"💰 Decimals для токена: {decimals}")
+            return decimals
+
+        except Exception as e:
+            logger.debug(f"❌ Ошибка получения decimals: {e}, используем 6")
+            return 6
+
     async def _fallback_to_single_wallet(self, token_address: str, base_amount: float,
                                          num_trades: int, source_info: Dict) -> MultiWalletTradeResult:
         """Fallback к обычной торговле одним кошельком"""
@@ -277,12 +373,29 @@ class MultiWalletManager:
 
     def _compile_results(self, token_address: str, wallet_results: List[Tuple[str, TradeResult]],
                          start_time: float, delayed_start: bool) -> MultiWalletTradeResult:
-        """Компиляция результатов торговли"""
+        """Компиляция результатов торговли - ИСПРАВЛЕННАЯ ВЕРСИЯ"""
         successful = sum(1 for _, r in wallet_results if r.success)
         failed = len(wallet_results) - successful
 
-        total_sol = sum(r.input_amount for _, r in wallet_results if r.success)
-        total_tokens = sum(r.output_amount or 0 for _, r in wallet_results if r.success)
+        # ИСПРАВЛЕНО: Правильный подсчет SOL и токенов с проверкой на None
+        total_sol = 0.0
+        total_tokens = 0.0
+
+        for _, r in wallet_results:
+            if r.success:
+                # SOL всегда есть при успешной сделке
+                total_sol += r.input_amount
+
+                # Токены могут быть None, проверяем
+                if r.output_amount is not None and r.output_amount > 0:
+                    total_tokens += r.output_amount
+                else:
+                    logger.warning(f"⚠️ Сделка {r.signature or 'unknown'} без данных о токенах")
+
+        logger.info(f"📊 Компиляция результатов:")
+        logger.info(f"  ✅ Успешных: {successful}/{len(wallet_results)}")
+        logger.info(f"  💰 Потрачено SOL: {total_sol:.6f}")
+        logger.info(f"  🪙 Куплено токенов: {total_tokens:,.6f}")
 
         return MultiWalletTradeResult(
             token_address=token_address,
@@ -290,7 +403,7 @@ class MultiWalletManager:
             successful_trades=successful,
             failed_trades=failed,
             total_sol_spent=total_sol,
-            total_tokens_bought=total_tokens,
+            total_tokens_bought=total_tokens,  # Уже правильно подсчитанные токены
             execution_time_ms=(time.time() - start_time) * 1000,
             wallet_results=wallet_results,
             delayed_start=delayed_start

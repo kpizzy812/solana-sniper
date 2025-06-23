@@ -76,30 +76,16 @@ class QuickBuyer:
             raise ValueError(f"Ошибка извлечения контракта: {e}")
 
     async def quick_buy(self, token_contract: str):
-        """Быстрая покупка без подтверждений"""
-        start_time = time.time()
-
-        # Проверяем контракт
-        if is_wrapped_sol(token_contract):
-            raise ValueError("Это Wrapped SOL - покупка не нужна")
-
-        logger.critical(f"⚡ БЫСТРАЯ ПОКУПКА: {token_contract}")
+        """Быстрая покупка с правильным подсчетом токенов"""
+        await jupiter_trader.start()
 
         try:
-            # Запускаем Jupiter trader
-            logger.info("🚀 Инициализация...")
-            if not await jupiter_trader.start():
-                raise Exception("Не удалось запустить торговую систему")
+            start_time = time.time()
 
             # Создаем торговый сигнал
             trading_signal = {
-                'platform': 'quick_buy_cli',
-                'source': 'Quick Buy CLI',
-                'author': 'Command Line',
-                'url': 'cli://quick',
-                'contracts': [token_contract],
-                'confidence': 1.0,
-                'urgency': 'high',
+                'platform': 'quick_buy',
+                'source': 'command_line',
                 'timestamp': time.time(),
                 'content_preview': f"Быстрая покупка {token_contract}",
                 'emergency': True
@@ -127,10 +113,10 @@ class QuickBuyer:
                         source_info=trading_signal
                     )
 
-                # Компактные результаты
+                # ИСПРАВЛЕНО: Компактные результаты с правильным подсчетом
                 print(f"✅ ГОТОВО: {result.successful_trades}/{result.total_trades} успешно")
                 print(f"💰 Потрачено: {result.total_sol_spent:.6f} SOL")
-                print(f"🪙 Куплено: {result.total_tokens_bought:,.0f} токенов")
+                print(f"🪙 Куплено: {result.total_tokens_bought:,.6f} токенов")  # Уже исправлено
                 print(f"⏱️ Время: {(time.time() - start_time):.1f}s")
 
                 # Подписи (только первые 3)
@@ -138,7 +124,7 @@ class QuickBuyer:
                 if signatures:
                     print("📝 Подписи:")
                     for i, sig in enumerate(signatures[:3]):
-                        print(f"   {i + 1}. {sig}")
+                        print(f"   {i + 1}.{sig}")
                     if len(signatures) > 3:
                         print(f"   ... и еще {len(signatures) - 3}")
 
@@ -155,9 +141,9 @@ class QuickBuyer:
 
                 if successful:
                     total_sol = sum(r.input_amount for r in successful)
-                    total_tokens = sum(r.output_amount or 0 for r in successful)
+                    total_tokens = sum(r.output_amount or 0 for r in successful)  # Уже исправлено
                     print(f"💰 Потрачено: {total_sol:.6f} SOL")
-                    print(f"🪙 Куплено: {total_tokens:,.0f} токенов")
+                    print(f"🪙 Куплено: {total_tokens:,.6f} токенов")
                     print(f"⏱️ Время: {(time.time() - start_time):.1f}s")
 
                     # Подписи

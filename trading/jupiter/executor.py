@@ -16,6 +16,7 @@ from solders.keypair import Keypair
 from solders.transaction import VersionedTransaction
 from solders.message import to_bytes_versioned
 import base58
+from solders.pubkey import Pubkey
 
 # Убираем прямой импорт settings для избежания циклических зависимостей
 # from config.settings import settings
@@ -177,14 +178,19 @@ class JupiterTradeExecutor:
 
     async def _execute_single_trade(self, token_address: str, trade_index: int,
                                     amount_sol: float, source_info: Dict) -> TradeResult:
-        """Выполнение одной сделки через Jupiter"""
+        """Выполнение одной сделки через Jupiter - ИСПРАВЛЕННАЯ ВЕРСИЯ"""
         start_time = time.time()
 
         try:
             # Локальный импорт для избежания циклических зависимостей
             from config.settings import settings
+            from solders.pubkey import Pubkey
 
             logger.debug(f"🚀 Запуск сделки {trade_index + 1}: {amount_sol} SOL -> {token_address}")
+
+            # НОВОЕ: Получаем баланс токенов ДО покупки
+            token_mint = Pubkey.from_string(token_address)
+            balance_before = await self._get_token_balance_with_decimals(self.wallet_keypair.pubkey(), token_mint)
 
             # Шаг 1: Получаем котировку от Jupiter
             quote = await self.jupiter_client.get_quote(
@@ -227,17 +233,27 @@ class JupiterTradeExecutor:
             signature = await self._send_transaction(swap_transaction)
 
             if signature:
-                output_amount = quote.out_amount_tokens
+                # ИСПРАВЛЕНО: Правильное определение количества купленных токенов
+                # Ждем подтверждения транзакции
+                await asyncio.sleep(2)  # Даем время на подтверждение
+
+                # Получаем баланс ПОСЛЕ покупки
+                balance_after = await self._get_token_balance_with_decimals(self.wallet_keypair.pubkey(), token_mint)
+
+                # Вычисляем реально купленное количество
+                actual_tokens_bought = balance_after - balance_before
+
                 execution_time = (time.time() - start_time) * 1000
 
                 logger.success(f"✅ Сделка {trade_index + 1} УСПЕШНА: {signature} ({execution_time:.0f}ms)")
+                logger.info(f"🪙 Реально куплено: {actual_tokens_bought:,.6f} токенов")
 
                 return TradeResult(
                     success=True,
                     signature=signature,
                     error=None,
                     input_amount=amount_sol,
-                    output_amount=output_amount,
+                    output_amount=actual_tokens_bought,  # ИСПРАВЛЕНО: используем реальное количество
                     price_impact=price_impact,
                     execution_time_ms=execution_time,
                     trade_index=trade_index
@@ -249,6 +265,87 @@ class JupiterTradeExecutor:
         except Exception as e:
             logger.error(f"❌ Ошибка сделки {trade_index + 1}: {e}")
             return self._create_failed_result(str(e), amount_sol, trade_index, start_time)
+
+    # НОВАЯ ФУНКЦИЯ: добавить в класс JupiterExecutor
+    async def _get_token_balance_with_decimals(self, wallet_pubkey: Pubkey, token_mint: Pubkey) -> float:
+        """Получает баланс токенов с правильным учетом decimals - КОПИЯ ИЗ TRANSFER_MANAGER"""
+        try:
+            from spl.token.instructions import get_associated_token_address
+            from solana.rpc.commitment import Confirmed
+
+            # Получаем associated token account
+            ata = get_associated_token_address(wallet_pubkey, token_mint)
+
+            # Получаем информацию об аккаунте
+            account_info = await self.solana_client.get_account_info(ata, commitment=Confirmed)
+
+            if not account_info.value:
+                logger.debug(f"💰 ATA не найден для {str(wallet_pubkey)[:8]}...")
+                return 0.0
+
+            data = account_info.value.data
+
+            if len(data) < 72:
+                logger.debug(f"💰 Некорректные данные ATA для {str(wallet_pubkey)[:8]}...")
+                return 0.0
+
+            # SPL Token Account layout:
+            # 0-32: mint (32 bytes)
+            # 32-64: owner (32 bytes)
+            # 64-72: amount (8 bytes little-endian uint64)
+            # 72-73: delegate option (1 byte)
+            # 73-74: state (1 byte)
+
+            # Извлекаем amount (позиция 64-72)
+            amount_bytes = data[64:72]
+            amount_raw = int.from_bytes(amount_bytes, byteorder='little')
+
+            if amount_raw == 0:
+                return 0.0
+
+            # Получаем decimals для токена
+            decimals = await self._get_token_decimals(token_mint)
+
+            # Вычисляем реальный баланс
+            balance = amount_raw / (10 ** decimals)
+
+            logger.debug(f"💰 Баланс {str(wallet_pubkey)[:8]}...: {balance:.6f} токенов")
+            return balance
+
+        except Exception as e:
+            logger.error(f"❌ Ошибка получения баланса токена: {e}")
+            return 0.0
+
+    # НОВАЯ ФУНКЦИЯ: добавить в класс JupiterExecutor
+    async def _get_token_decimals(self, token_mint: Pubkey) -> int:
+        """Получает количество decimals для токена - КОПИЯ ИЗ TRANSFER_MANAGER"""
+        try:
+            from solana.rpc.commitment import Confirmed
+
+            # Получаем информацию о mint аккаунте
+            mint_info = await self.solana_client.get_account_info(token_mint, commitment=Confirmed)
+
+            if not mint_info.value:
+                logger.debug(f"📊 Mint аккаунт не найден, используем 6 decimals по умолчанию")
+                return 6  # Стандартное значение
+
+            data = mint_info.value.data
+
+            if len(data) < 44:
+                return 6
+
+            # SPL Token Mint layout:
+            # 0-4: mint_authority option (4 bytes)
+            # 4-8: supply (8 bytes)
+            # 36: decimals (1 byte)
+            decimals = data[44]  # decimals на позиции 44
+
+            logger.debug(f"💰 Decimals для токена: {decimals}")
+            return decimals
+
+        except Exception as e:
+            logger.debug(f"❌ Ошибка получения decimals: {e}, используем 6")
+            return 6  # Fallback на стандартное значение
 
     def _create_failed_result(self, error: str, amount: float, trade_index: int, start_time: float) -> TradeResult:
         """Создание результата неудачной сделки"""
@@ -325,15 +422,30 @@ class JupiterTradeExecutor:
         self.total_tokens_bought += session.total_tokens_bought
 
     def _log_session_summary(self, session: TradingSession):
-        """Логирование итогов торговой сессии"""
+        """Логирование итогов торговой сессии - ИСПРАВЛЕННАЯ ВЕРСИЯ"""
         total_time = (time.time() - session.start_time) * 1000
+
+        # ИСПРАВЛЕНО: Правильный подсчет купленных токенов
+        total_tokens_bought = 0.0
+        successful_trades_with_tokens = 0
+
+        for result in session.results:
+            if result.success and result.output_amount is not None and result.output_amount > 0:
+                total_tokens_bought += result.output_amount
+                successful_trades_with_tokens += 1
 
         logger.critical("🎯 ИТОГИ СНАЙПЕР АТАКИ:")
         logger.info(f"  📍 Контракт: {session.token_address}")
-        logger.info(f"  📱 Источник: {session.source_info.get('platform', 'unknown')} - {session.source_info.get('source', 'unknown')}")
+        logger.info(
+            f"  📱 Источник: {session.source_info.get('platform', 'unknown')} - {session.source_info.get('source', 'unknown')}")
         logger.info(f"  ✅ Успешных сделок: {session.successful_trades}/{len(session.results)}")
         logger.info(f"  💰 Потрачено SOL: {session.total_sol_spent:.4f}")
-        logger.info(f"  🪙 Куплено токенов: {session.total_tokens_bought:,.0f}")
+        logger.info(f"  🪙 Куплено токенов: {total_tokens_bought:,.6f}")  # ИСПРАВЛЕНО
+
+        if successful_trades_with_tokens < session.successful_trades:
+            logger.warning(
+                f"  ⚠️ {session.successful_trades - successful_trades_with_tokens} сделок без данных о токенах")
+
         logger.info(f"  ⚡ Общее время: {total_time:.0f}ms")
 
         if len(session.results) > 0:
@@ -346,6 +458,9 @@ class JupiterTradeExecutor:
             logger.info("  📝 Подписи успешных транзакций:")
             for i, sig in enumerate(signatures):
                 logger.info(f"    {i + 1}. {sig}")
+
+        # НОВОЕ: Обновляем session с правильными данными
+        session.total_tokens_bought = total_tokens_bought
 
     async def get_sol_balance(self) -> float:
         """Получение баланса SOL"""
@@ -378,3 +493,158 @@ class JupiterTradeExecutor:
         self.total_sol_spent = 0.0
         self.total_tokens_bought = 0.0
         logger.info("📊 Статистика торговли сброшена")
+
+    async def _get_token_balance_with_decimals(self, wallet_pubkey: Pubkey, token_mint: Pubkey) -> float:
+        """Получает баланс токенов с правильным учетом decimals - КОПИЯ ИЗ TRANSFER_MANAGER"""
+        try:
+            from spl.token.instructions import get_associated_token_address
+            from solana.rpc.commitment import Confirmed
+
+            # Получаем associated token account
+            ata = get_associated_token_address(wallet_pubkey, token_mint)
+
+            # Получаем информацию об аккаунте
+            account_info = await self.solana_client.get_account_info(ata, commitment=Confirmed)
+
+            if not account_info.value:
+                logger.debug(f"💰 ATA не найден для {str(wallet_pubkey)[:8]}...")
+                return 0.0
+
+            data = account_info.value.data
+
+            if len(data) < 72:
+                logger.debug(f"💰 Некорректные данные ATA для {str(wallet_pubkey)[:8]}...")
+                return 0.0
+
+            # SPL Token Account layout:
+            # 0-32: mint (32 bytes)
+            # 32-64: owner (32 bytes)
+            # 64-72: amount (8 bytes little-endian uint64)
+            # 72-73: delegate option (1 byte)
+            # 73-74: state (1 byte)
+
+            # Извлекаем amount (позиция 64-72)
+            amount_bytes = data[64:72]
+            amount_raw = int.from_bytes(amount_bytes, byteorder='little')
+
+            if amount_raw == 0:
+                return 0.0
+
+            # Получаем decimals для токена
+            decimals = await self._get_token_decimals(token_mint)
+
+            # Вычисляем реальный баланс
+            balance = amount_raw / (10 ** decimals)
+
+            logger.debug(f"💰 Баланс {str(wallet_pubkey)[:8]}...: {balance:.6f} токенов")
+            return balance
+
+        except Exception as e:
+            logger.error(f"❌ Ошибка получения баланса токена: {e}")
+            return 0.0
+
+    # НОВАЯ ФУНКЦИЯ: добавить в класс JupiterExecutor
+    async def _get_token_decimals(self, token_mint: Pubkey) -> int:
+        """Получает количество decimals для токена - КОПИЯ ИЗ TRANSFER_MANAGER"""
+        try:
+            from solana.rpc.commitment import Confirmed
+
+            # Получаем информацию о mint аккаунте
+            mint_info = await self.solana_client.get_account_info(token_mint, commitment=Confirmed)
+
+            if not mint_info.value:
+                logger.debug(f"📊 Mint аккаунт не найден, используем 6 decimals по умолчанию")
+                return 6  # Стандартное значение
+
+            data = mint_info.value.data
+
+            if len(data) < 44:
+                return 6
+
+            # SPL Token Mint layout:
+            # 0-4: mint_authority option (4 bytes)
+            # 4-8: supply (8 bytes)
+            # 36: decimals (1 byte)
+            decimals = data[44]  # decimals на позиции 44
+
+            logger.debug(f"💰 Decimals для токена: {decimals}")
+            return decimals
+
+        except Exception as e:
+            logger.debug(f"❌ Ошибка получения decimals: {e}, используем 6")
+            return 6  # Fallback на стандартное значение
+
+    async def _execute_single_trade_without_balance_check(self, token_address: str, trade_index: int,
+                                                          amount_sol: float, source_info: Dict) -> TradeResult:
+        """Выполнение одной сделки через Jupiter БЕЗ проверки баланса (для мультикошельков)"""
+        start_time = time.time()
+
+        try:
+            # Локальный импорт для избежания циклических зависимостей
+            from config.settings import settings
+
+            logger.debug(f"🚀 Запуск сделки {trade_index + 1}: {amount_sol} SOL -> {token_address}")
+
+            # Шаг 1: Получаем котировку от Jupiter
+            quote = await self.jupiter_client.get_quote(
+                input_mint=settings.trading.base_token,  # SOL
+                output_mint=token_address,
+                amount=int(amount_sol * 1e9),  # Конвертируем в lamports
+                slippage_bps=settings.trading.slippage_bps
+            )
+
+            if not quote:
+                return self._create_failed_result("Не удалось получить котировку",
+                                                  amount_sol, trade_index, start_time)
+
+            # Проверяем price impact
+            price_impact = quote.price_impact_float
+            if price_impact > settings.security.max_price_impact:
+                return self._create_failed_result(
+                    f"Слишком большое проскальзывание: {price_impact}%",
+                    amount_sol, trade_index, start_time
+                )
+
+            logger.debug(
+                f"💹 Сделка {trade_index + 1} котировка: {quote.out_amount} токенов, {price_impact}% проскальзывание")
+
+            # Шаг 2: Создаем запрос на swap транзакцию
+            swap_request = SwapRequest(
+                quote_response=quote,
+                user_public_key=str(self.wallet_keypair.pubkey()),
+                priority_fee_lamports=settings.trading.priority_fee
+            )
+
+            # Шаг 3: Получаем транзакцию обмена
+            swap_transaction = await self.jupiter_client.get_swap_transaction(swap_request)
+
+            if not swap_transaction:
+                return self._create_failed_result("Не удалось создать транзакцию обмена",
+                                                  amount_sol, trade_index, start_time)
+
+            # Шаг 4: Подписываем и отправляем транзакцию
+            signature = await self._send_transaction(swap_transaction)
+
+            if signature:
+                execution_time = (time.time() - start_time) * 1000
+
+                logger.success(f"✅ Сделка {trade_index + 1} УСПЕШНА: {signature} ({execution_time:.0f}ms)")
+
+                # ВАЖНО: НЕ проверяем баланс здесь - это делает вызывающий код
+                return TradeResult(
+                    success=True,
+                    signature=signature,
+                    error=None,
+                    input_amount=amount_sol,
+                    output_amount=0.0,  # Будет заполнено вызывающим кодом
+                    price_impact=price_impact,
+                    execution_time_ms=execution_time,
+                    trade_index=trade_index
+                )
+            else:
+                return self._create_failed_result("Транзакция не отправилась",
+                                                  amount_sol, trade_index, start_time)
+
+        except Exception as e:
+            logger.error(f"❌ Ошибка сделки {trade_index + 1}: {e}")
+            return self._create_failed_result(str(e), amount_sol, trade_index, start_time)
