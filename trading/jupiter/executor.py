@@ -574,7 +574,7 @@ class JupiterTradeExecutor:
                 input_mint=settings.trading.base_token,  # SOL
                 output_mint=token_address,
                 amount=int(amount_sol * 1e9),  # Конвертируем в lamports
-                slippage_bps=settings.trading.slippage_bps
+                slippage_bps=settings.trading.get_random_slippage()
             )
 
             if not quote:
@@ -596,7 +596,7 @@ class JupiterTradeExecutor:
             swap_request = SwapRequest(
                 quote_response=quote,
                 user_public_key=str(self.wallet_keypair.pubkey()),
-                priority_fee_lamports=settings.trading.priority_fee,
+                priority_fee_lamports=settings.trading.get_random_priority_fee(),
                 destination_token_account=None
             )
 

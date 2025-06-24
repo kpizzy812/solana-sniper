@@ -1,7 +1,8 @@
 import os
 from dataclasses import dataclass
-
-
+import random
+from typing import List
+from loguru import logger
 @dataclass
 class TradingConfig:
     """Настройки торговой системы"""
@@ -19,6 +20,44 @@ class TradingConfig:
 
     # НОВАЯ НАСТРОЙКА для трат всего баланса
     use_max_available_balance: bool = os.getenv('USE_MAX_AVAILABLE_BALANCE', 'false').lower() in ['true', '1', 'yes']
+
+    # Списки для рандомного выбора
+    priority_fee_list: List[int] = None
+    slippage_bps_list: List[int] = None
+
+    def __post_init__(self):
+        """Инициализация списков для рандомизации"""
+        # Читаем списки из .env
+        priority_fee_str = os.getenv('PRIORITY_FEE_LIST', '')
+        slippage_bps_str = os.getenv('SLIPPAGE_BPS_LIST', '')
+
+        # Парсим priority fees
+        if priority_fee_str:
+            try:
+                self.priority_fee_list = [int(x.strip()) for x in priority_fee_str.split(',') if x.strip()]
+            except ValueError:
+                logger.warning("⚠️ Ошибка парсинга PRIORITY_FEE_LIST, используем базовое значение")
+                self.priority_fee_list = [self.priority_fee]
+        else:
+            self.priority_fee_list = [self.priority_fee]
+
+        # Парсим slippage
+        if slippage_bps_str:
+            try:
+                self.slippage_bps_list = [int(x.strip()) for x in slippage_bps_str.split(',') if x.strip()]
+            except ValueError:
+                logger.warning("⚠️ Ошибка парсинга SLIPPAGE_BPS_LIST, используем базовое значение")
+                self.slippage_bps_list = [self.slippage_bps]
+        else:
+            self.slippage_bps_list = [self.slippage_bps]
+
+    def get_random_priority_fee(self) -> int:
+        """Случайный выбор приоритетной комиссии из списка"""
+        return random.choice(self.priority_fee_list)
+
+    def get_random_slippage(self) -> int:
+        """Случайный выбор проскальзывания из списка"""
+        return random.choice(self.slippage_bps_list)
 
     @property
     def total_investment(self) -> float:

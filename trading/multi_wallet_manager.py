@@ -285,7 +285,7 @@ class MultiWalletManager:
 
             if not account_info.value:
                 # Ждем создания ATA и проверяем еще раз
-                await asyncio.sleep(3)
+                await asyncio.sleep(1)
                 account_info = await self.solana_client.get_account_info(ata, commitment=Confirmed)
 
                 if not account_info.value:
@@ -455,9 +455,39 @@ class MultiWalletManager:
                 logger.info(f"    {i + 1}. {sig}")
 
     async def update_all_balances(self):
-        """Обновление балансов всех кошельков"""
+        """Обновление балансов всех кошельков батчами под RPC лимиты"""
         if not self.config.wallets:
             return
+
+        logger.debug("🔄 Обновление балансов множественных кошельков...")
+
+        batch_size = 1  # 8 кошельков одновременно для Helius 10 RPS
+
+        for i in range(0, len(self.config.wallets), batch_size):
+            batch = self.config.wallets[i:i + batch_size]
+
+            # Получаем балансы батча параллельно
+            balance_tasks = []
+            for wallet in batch:
+                task = asyncio.create_task(self._get_wallet_balance(wallet))
+                balance_tasks.append(task)
+
+            results = await asyncio.gather(*balance_tasks, return_exceptions=True)
+
+            # Обновляем балансы батча
+            for wallet, result in zip(batch, results):
+                if isinstance(result, Exception):
+                    logger.warning(f"⚠️ Ошибка получения баланса {wallet.address[:8]}...: {result}")
+                else:
+                    wallet.update_balance(result)
+
+            # Пауза между батчами (кроме последнего)
+            if i + batch_size < len(self.config.wallets):
+                await asyncio.sleep(0.5)  # 200ms между батчами
+
+        total_balance = sum(w.balance_sol for w in self.config.wallets)
+        available_balance = sum(w.available_balance for w in self.config.wallets)
+        logger.debug(f"💰 Обновлены балансы: {total_balance:.4f} SOL общий, {available_balance:.4f} SOL доступно")
 
         logger.debug("🔄 Обновление балансов множественных кошельков...")
 

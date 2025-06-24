@@ -68,7 +68,7 @@ class MultiWalletConfig:
 
     # Задержка между покупками
     initial_delay_seconds: float = float(os.getenv('INITIAL_TRADING_DELAY', '15'))  # 15 сек задержка
-    inter_trade_delay: tuple = (1.0, 5.0)  # Задержка между сделками разных кошельков
+    inter_trade_delay: tuple = (0.25, 0.6)  # Задержка между сделками разных кошельков
 
     # Загруженные кошельки
     wallets: List[MultiWalletInfo] = None
