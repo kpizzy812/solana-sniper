@@ -190,7 +190,7 @@ class JupiterTradeExecutor:
 
             # НОВОЕ: Получаем баланс токенов ДО покупки
             token_mint = Pubkey.from_string(token_address)
-            balance_before = await self._get_token_balance_with_decimals(self.wallet_keypair.pubkey(), token_mint)
+            # balance_before = await self._get_token_balance_with_decimals(self.wallet_keypair.pubkey(), token_mint)
 
             # Шаг 1: Получаем котировку от Jupiter
             quote = await self.jupiter_client.get_quote(
@@ -236,25 +236,25 @@ class JupiterTradeExecutor:
             if signature:
                 # ИСПРАВЛЕНО: Правильное определение количества купленных токенов
                 # Ждем подтверждения транзакции
-                await asyncio.sleep(2)  # Даем время на подтверждение
+                # await asyncio.sleep(2)  # Даем время на подтверждение
 
                 # Получаем баланс ПОСЛЕ покупки
-                balance_after = await self._get_token_balance_with_decimals(self.wallet_keypair.pubkey(), token_mint)
+                # balance_after = await self._get_token_balance_with_decimals(self.wallet_keypair.pubkey(), token_mint)
 
                 # Вычисляем реально купленное количество
-                actual_tokens_bought = balance_after - balance_before
+                # actual_tokens_bought = balance_after - balance_before
 
                 execution_time = (time.time() - start_time) * 1000
 
                 logger.success(f"✅ Сделка {trade_index + 1} УСПЕШНА: {signature} ({execution_time:.0f}ms)")
-                logger.info(f"🪙 Реально куплено: {actual_tokens_bought:,.6f} токенов")
+                # logger.info(f"🪙 Реально куплено: {actual_tokens_bought:,.6f} токенов")
 
                 return TradeResult(
                     success=True,
                     signature=signature,
                     error=None,
                     input_amount=amount_sol,
-                    output_amount=actual_tokens_bought,  # ИСПРАВЛЕНО: используем реальное количество
+                    output_amount=0.0,
                     price_impact=price_impact,
                     execution_time_ms=execution_time,
                     trade_index=trade_index
@@ -268,85 +268,35 @@ class JupiterTradeExecutor:
             return self._create_failed_result(str(e), amount_sol, trade_index, start_time)
 
     # НОВАЯ ФУНКЦИЯ: добавить в класс JupiterExecutor
-    async def _get_token_balance_with_decimals(self, wallet_pubkey: Pubkey, token_mint: Pubkey) -> float:
-        """Получает баланс токенов с правильным учетом decimals - КОПИЯ ИЗ TRANSFER_MANAGER"""
-        try:
-            from spl.token.instructions import get_associated_token_address
-            from solana.rpc.commitment import Confirmed
-
-            # Получаем associated token account
-            ata = get_associated_token_address(wallet_pubkey, token_mint)
-
-            # Получаем информацию об аккаунте
-            account_info = await self.solana_client.get_account_info(ata, commitment=Confirmed)
-
-            if not account_info.value:
-                logger.debug(f"💰 ATA не найден для {str(wallet_pubkey)[:8]}...")
-                return 0.0
-
-            data = account_info.value.data
-
-            if len(data) < 72:
-                logger.debug(f"💰 Некорректные данные ATA для {str(wallet_pubkey)[:8]}...")
-                return 0.0
-
-            # SPL Token Account layout:
-            # 0-32: mint (32 bytes)
-            # 32-64: owner (32 bytes)
-            # 64-72: amount (8 bytes little-endian uint64)
-            # 72-73: delegate option (1 byte)
-            # 73-74: state (1 byte)
-
-            # Извлекаем amount (позиция 64-72)
-            amount_bytes = data[64:72]
-            amount_raw = int.from_bytes(amount_bytes, byteorder='little')
-
-            if amount_raw == 0:
-                return 0.0
-
-            # Получаем decimals для токена
-            decimals = await self._get_token_decimals(token_mint)
-
-            # Вычисляем реальный баланс
-            balance = amount_raw / (10 ** decimals)
-
-            logger.debug(f"💰 Баланс {str(wallet_pubkey)[:8]}...: {balance:.6f} токенов")
-            return balance
-
-        except Exception as e:
-            logger.error(f"❌ Ошибка получения баланса токена: {e}")
-            return 0.0
-
-    # НОВАЯ ФУНКЦИЯ: добавить в класс JupiterExecutor
-    async def _get_token_decimals(self, token_mint: Pubkey) -> int:
-        """Получает количество decimals для токена - КОПИЯ ИЗ TRANSFER_MANAGER"""
-        try:
-            from solana.rpc.commitment import Confirmed
-
-            # Получаем информацию о mint аккаунте
-            mint_info = await self.solana_client.get_account_info(token_mint, commitment=Confirmed)
-
-            if not mint_info.value:
-                logger.debug(f"📊 Mint аккаунт не найден, используем 6 decimals по умолчанию")
-                return 6  # Стандартное значение
-
-            data = mint_info.value.data
-
-            if len(data) < 44:
-                return 6
-
-            # SPL Token Mint layout:
-            # 0-4: mint_authority option (4 bytes)
-            # 4-8: supply (8 bytes)
-            # 36: decimals (1 byte)
-            decimals = data[44]  # decimals на позиции 44
-
-            logger.debug(f"💰 Decimals для токена: {decimals}")
-            return decimals
-
-        except Exception as e:
-            logger.debug(f"❌ Ошибка получения decimals: {e}, используем 6")
-            return 6  # Fallback на стандартное значение
+    # async def _get_token_decimals(self, token_mint: Pubkey) -> int:
+    #     """Получает количество decimals для токена - КОПИЯ ИЗ TRANSFER_MANAGER"""
+    #     try:
+    #         from solana.rpc.commitment import Confirmed
+    #
+    #         # Получаем информацию о mint аккаунте
+    #         mint_info = await self.solana_client.get_account_info(token_mint, commitment=Confirmed)
+    #
+    #         if not mint_info.value:
+    #             logger.debug(f"📊 Mint аккаунт не найден, используем 6 decimals по умолчанию")
+    #             return 6  # Стандартное значение
+    #
+    #         data = mint_info.value.data
+    #
+    #         if len(data) < 44:
+    #             return 6
+    #
+    #         # SPL Token Mint layout:
+    #         # 0-4: mint_authority option (4 bytes)
+    #         # 4-8: supply (8 bytes)
+    #         # 36: decimals (1 byte)
+    #         decimals = data[44]  # decimals на позиции 44
+    #
+    #         logger.debug(f"💰 Decimals для токена: {decimals}")
+    #         return decimals
+    #
+    #     except Exception as e:
+    #         logger.debug(f"❌ Ошибка получения decimals: {e}, используем 6")
+    #         return 6  # Fallback на стандартное значение
 
     def _create_failed_result(self, error: str, amount: float, trade_index: int, start_time: float) -> TradeResult:
         """Создание результата неудачной сделки"""
@@ -495,92 +445,55 @@ class JupiterTradeExecutor:
         self.total_tokens_bought = 0.0
         logger.info("📊 Статистика торговли сброшена")
 
-    async def _get_token_balance_with_decimals(self, wallet_pubkey: Pubkey, token_mint: Pubkey) -> float:
-        """Получает баланс токенов с правильным учетом decimals - КОПИЯ ИЗ TRANSFER_MANAGER"""
-        try:
-            from spl.token.instructions import get_associated_token_address
-            from solana.rpc.commitment import Confirmed
+    # async def _get_token_balance_with_decimals(self, wallet_pubkey: Pubkey, token_mint: Pubkey) -> float:
+    #     """Получает баланс токенов с правильным учетом decimals - КОПИЯ ИЗ TRANSFER_MANAGER"""
+    #     try:
+    #         from spl.token.instructions import get_associated_token_address
+    #         from solana.rpc.commitment import Confirmed
+    #
+    #         # Получаем associated token account
+    #         ata = get_associated_token_address(wallet_pubkey, token_mint)
+    #
+    #         # Получаем информацию об аккаунте
+    #         account_info = await self.solana_client.get_account_info(ata, commitment=Confirmed)
+    #
+    #         if not account_info.value:
+    #             logger.debug(f"💰 ATA не найден для {str(wallet_pubkey)[:8]}...")
+    #             return 0.0
+    #
+    #         data = account_info.value.data
+    #
+    #         if len(data) < 72:
+    #             logger.debug(f"💰 Некорректные данные ATA для {str(wallet_pubkey)[:8]}...")
+    #             return 0.0
+    #
+    #         # SPL Token Account layout:
+    #         # 0-32: mint (32 bytes)
+    #         # 32-64: owner (32 bytes)
+    #         # 64-72: amount (8 bytes little-endian uint64)
+    #         # 72-73: delegate option (1 byte)
+    #         # 73-74: state (1 byte)
+    #
+    #         # Извлекаем amount (позиция 64-72)
+    #         amount_bytes = data[64:72]
+    #         amount_raw = int.from_bytes(amount_bytes, byteorder='little')
+    #
+    #         if amount_raw == 0:
+    #             return 0.0
+    #
+    #         # Получаем decimals для токена
+    #         decimals = await self._get_token_decimals(token_mint)
+    #
+    #         # Вычисляем реальный баланс
+    #         balance = amount_raw / (10 ** decimals)
+    #
+    #         logger.debug(f"💰 Баланс {str(wallet_pubkey)[:8]}...: {balance:.6f} токенов")
+    #         return balance
+    #
+    #     except Exception as e:
+    #         logger.error(f"❌ Ошибка получения баланса токена: {e}")
+    #         return 0.0
 
-            # Получаем associated token account
-            ata = get_associated_token_address(wallet_pubkey, token_mint)
-
-            # Получаем информацию об аккаунте
-            account_info = await self.solana_client.get_account_info(ata, commitment=Confirmed)
-
-            if not account_info.value:
-                # Ждем создания ATA и проверяем еще раз
-                await asyncio.sleep(3)
-                account_info = await self.solana_client.get_account_info(ata, commitment=Confirmed)
-
-                if not account_info.value:
-                    logger.debug(f"💰 ATA не найден для {str(wallet_pubkey)[:8]}...")
-                    return 0.0
-
-            data = account_info.value.data
-
-            data = account_info.value.data
-
-            if len(data) < 72:
-                logger.debug(f"💰 Некорректные данные ATA для {str(wallet_pubkey)[:8]}...")
-                return 0.0
-
-            # SPL Token Account layout:
-            # 0-32: mint (32 bytes)
-            # 32-64: owner (32 bytes)
-            # 64-72: amount (8 bytes little-endian uint64)
-            # 72-73: delegate option (1 byte)
-            # 73-74: state (1 byte)
-
-            # Извлекаем amount (позиция 64-72)
-            amount_bytes = data[64:72]
-            amount_raw = int.from_bytes(amount_bytes, byteorder='little')
-
-            if amount_raw == 0:
-                return 0.0
-
-            # Получаем decimals для токена
-            decimals = await self._get_token_decimals(token_mint)
-
-            # Вычисляем реальный баланс
-            balance = amount_raw / (10 ** decimals)
-
-            logger.debug(f"💰 Баланс {str(wallet_pubkey)[:8]}...: {balance:.6f} токенов")
-            return balance
-
-        except Exception as e:
-            logger.error(f"❌ Ошибка получения баланса токена: {e}")
-            return 0.0
-
-    # НОВАЯ ФУНКЦИЯ: добавить в класс JupiterExecutor
-    async def _get_token_decimals(self, token_mint: Pubkey) -> int:
-        """Получает количество decimals для токена - КОПИЯ ИЗ TRANSFER_MANAGER"""
-        try:
-            from solana.rpc.commitment import Confirmed
-
-            # Получаем информацию о mint аккаунте
-            mint_info = await self.solana_client.get_account_info(token_mint, commitment=Confirmed)
-
-            if not mint_info.value:
-                logger.debug(f"📊 Mint аккаунт не найден, используем 6 decimals по умолчанию")
-                return 6  # Стандартное значение
-
-            data = mint_info.value.data
-
-            if len(data) < 44:
-                return 6
-
-            # SPL Token Mint layout:
-            # 0-4: mint_authority option (4 bytes)
-            # 4-8: supply (8 bytes)
-            # 36: decimals (1 byte)
-            decimals = data[44]  # decimals на позиции 44
-
-            logger.debug(f"💰 Decimals для токена: {decimals}")
-            return decimals
-
-        except Exception as e:
-            logger.debug(f"❌ Ошибка получения decimals: {e}, используем 6")
-            return 6  # Fallback на стандартное значение
 
     async def _execute_single_trade_without_balance_check(self, token_address: str, trade_index: int,
                                                           amount_sol: float, source_info: Dict) -> TradeResult:

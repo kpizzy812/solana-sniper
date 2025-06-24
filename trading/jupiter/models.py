@@ -91,7 +91,7 @@ class SwapRequest:
 
     def to_dict(self) -> Dict:
         """Преобразование в словарь для API запроса"""
-        return {
+        payload = {
             'quoteResponse': {
                 'inputMint': self.quote_response.input_mint,
                 'outputMint': self.quote_response.output_mint,
@@ -105,9 +105,7 @@ class SwapRequest:
                 'routePlan': self.quote_response.route_plan
             },
             'userPublicKey': self.user_public_key,
-            # УБИРАЕМ useSharedAccounts - причина ошибки Simple AMMs
             'wrapAndUnwrapSol': self.wrap_and_unwrap_sol,
-            'feeAccount': self.fee_account,
             'asLegacyTransaction': self.as_legacy_transaction,
             'useTokenLedger': self.use_token_ledger,
             'dynamicComputeUnitLimit': self.dynamic_compute_unit_limit,
@@ -118,6 +116,14 @@ class SwapRequest:
                 }
             }
         }
+
+        # НЕ ДОБАВЛЯЕМ destinationTokenAccount ВООБЩЕ
+        # Пусть Jupiter сам разбирается с ATA
+
+        if self.fee_account:
+            payload['feeAccount'] = self.fee_account
+
+        return payload
 
 
 @dataclass
