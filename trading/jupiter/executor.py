@@ -312,7 +312,7 @@ class JupiterTradeExecutor:
         )
 
     async def _send_transaction(self, swap_transaction_b64: str) -> Optional[str]:
-        """Подпись и отправка транзакции в Solana - ИСПРАВЛЕННАЯ ВЕРСИЯ ДЛЯ SOLDERS 0.26.0"""
+        """Подпись и отправка транзакции в Solana - ИСПРАВЛЕННАЯ ВЕРСИЯ С ДИАГНОСТИКОЙ"""
         try:
             # Локальный импорт для избежания циклических зависимостей
             from config.settings import settings
@@ -334,19 +334,82 @@ class JupiterTradeExecutor:
 
             logger.debug(f"✅ Транзакция подписана успешно")
 
-            # Отправляем с высоким приоритетом
+            # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: ВКЛЮЧАЕМ preflight для диагностики ошибок
             opts = TxOpts(
-                skip_preflight=True,  # Пропускаем симуляцию для скорости
+                skip_preflight=False,  # ИСПРАВЛЕНО: НЕ пропускаем симуляцию для диагностики
                 preflight_commitment=Confirmed,
                 max_retries=settings.trading.max_retries
             )
 
+            logger.debug(f"🔍 Отправка транзакции с preflight проверкой...")
+
+            # Сначала симулируем транзакцию для диагностики
+            try:
+                simulation_result = await self.solana_client.simulate_transaction(
+                    signed_transaction,
+                    commitment=Confirmed
+                )
+
+                if simulation_result.value.err:
+                    logger.error(f"❌ Симуляция транзакции НЕУДАЧНА:")
+                    logger.error(f"   Ошибка: {simulation_result.value.err}")
+                    if simulation_result.value.logs:
+                        logger.error(f"   Логи:")
+                        for log in simulation_result.value.logs:
+                            logger.error(f"     {log}")
+                    return None
+                else:
+                    logger.debug(f"✅ Симуляция транзакции успешна")
+                    if simulation_result.value.logs:
+                        for log in simulation_result.value.logs[-3:]:  # Последние 3 лога
+                            logger.debug(f"   📝 {log}")
+
+            except Exception as sim_error:
+                logger.error(f"❌ Ошибка симуляции: {sim_error}")
+                # Продолжаем отправку даже при ошибке симуляции
+
+            # Отправляем транзакцию
             response = await self.solana_client.send_transaction(signed_transaction, opts=opts)
 
             if response.value:
                 signature_str = str(response.value)
                 logger.debug(f"📤 Транзакция отправлена: {signature_str}")
-                return signature_str
+
+                # НОВОЕ: Ждем подтверждения и проверяем статус
+                try:
+                    await asyncio.sleep(1)  # Даем время на обработку
+
+                    # Проверяем статус транзакции
+                    confirmed_result = await self.solana_client.get_transaction(
+                        response.value,
+                        commitment=Confirmed,
+                        encoding='json',
+                        max_supported_transaction_version=0
+                    )
+
+                    if confirmed_result.value:
+                        if confirmed_result.value.meta and confirmed_result.value.meta.err:
+                            logger.error(f"❌ Транзакция подтверждена, но НЕУДАЧНА:")
+                            logger.error(f"   Подпись: {signature_str}")
+                            logger.error(f"   Ошибка: {confirmed_result.value.meta.err}")
+
+                            if confirmed_result.value.meta.log_messages:
+                                logger.error(f"   Логи транзакции:")
+                                for log in confirmed_result.value.meta.log_messages:
+                                    logger.error(f"     {log}")
+                            return None
+                        else:
+                            logger.success(f"✅ Транзакция УСПЕШНО подтверждена: {signature_str}")
+                            return signature_str
+                    else:
+                        logger.warning(f"⚠️ Транзакция отправлена, но статус неизвестен: {signature_str}")
+                        return signature_str
+
+                except Exception as confirm_error:
+                    logger.warning(f"⚠️ Ошибка проверки статуса: {confirm_error}")
+                    # Возвращаем подпись даже если не смогли проверить статус
+                    return signature_str
+
             else:
                 logger.error("❌ Транзакция не отправилась")
                 return None

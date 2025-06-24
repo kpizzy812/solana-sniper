@@ -1,5 +1,5 @@
 """
-📊 MORI Sniper Bot - Jupiter Models
+📊 MORI Sniper Bot - Jupiter Models ИСПРАВЛЕННАЯ ВЕРСИЯ
 Модели данных для работы с Jupiter DEX API
 """
 
@@ -29,7 +29,7 @@ class TradeResult:
 
 @dataclass
 class QuoteResponse:
-    """Ответ от Jupiter API с котировкой - ИСПРАВЛЕННАЯ СТРУКТУРА для v1 API"""
+    """Ответ от Jupiter API с котировкой - ИСПРАВЛЕННАЯ СТРУКТУРА"""
     input_mint: str
     output_mint: str
     in_amount: str
@@ -78,7 +78,7 @@ class QuoteResponse:
 
 @dataclass
 class SwapRequest:
-    """Запрос на создание swap транзакции"""
+    """Запрос на создание swap транзакции - ИСПРАВЛЕННАЯ ВЕРСИЯ ДЛЯ JUPITER V6/V1"""
     quote_response: QuoteResponse
     user_public_key: str
     wrap_and_unwrap_sol: bool = True
@@ -90,7 +90,7 @@ class SwapRequest:
     priority_fee_lamports: int = 100000
 
     def to_dict(self) -> Dict:
-        """Преобразование в словарь для API запроса"""
+        """Преобразование в словарь для API запроса - ИСПРАВЛЕННАЯ ВЕРСИЯ"""
         payload = {
             'quoteResponse': {
                 'inputMint': self.quote_response.input_mint,
@@ -109,17 +109,21 @@ class SwapRequest:
             'asLegacyTransaction': self.as_legacy_transaction,
             'useTokenLedger': self.use_token_ledger,
             'dynamicComputeUnitLimit': self.dynamic_compute_unit_limit,
-            'prioritizationFeeLamports': {
-                'priorityLevelWithMaxLamports': {
-                    'maxLamports': self.priority_fee_lamports,
-                    'priorityLevel': 'veryHigh'
-                }
-            }
         }
 
-        # НЕ ДОБАВЛЯЕМ destinationTokenAccount ВООБЩЕ
-        # Пусть Jupiter сам разбирается с ATA
+        # ИСПРАВЛЕННАЯ СТРУКТУРА prioritizationFeeLamports для Jupiter V6
+        # Используем простое число как рекомендует актуальная документация
+        payload['prioritizationFeeLamports'] = self.priority_fee_lamports
 
+        # АЛЬТЕРНАТИВНО можно использовать объект (если простое число не работает):
+        # payload['prioritizationFeeLamports'] = {
+        #     'priorityLevelWithMaxLamports': {
+        #         'maxLamports': self.priority_fee_lamports,
+        #         'priorityLevel': 'veryHigh'
+        #     }
+        # }
+
+        # НЕ ДОБАВЛЯЕМ destinationTokenAccount - пусть Jupiter сам создает ATA
         if self.fee_account:
             payload['feeAccount'] = self.fee_account
 

@@ -40,26 +40,35 @@ class EmergencyBuyer:
         print("⚙️ ТЕКУЩИЕ НАСТРОЙКИ:")
         print(f"  📊 Проскальзывание: {settings.trading.slippage_bps / 100}%")
         print(f"  💰 Приоритетная комиссия: {settings.trading.priority_fee:,} microlamports")
+        print(f"  ⛽ Резерв на газ: 0.015 SOL (добавлен автоматически)")
 
         if self.multi_wallet_config.is_enabled():
             wallet_count = len(self.multi_wallet_config.wallets)
             print(f"  🎭 Режим: Множественные кошельки ({wallet_count} шт)")
 
             if self.multi_wallet_config.use_max_available_balance:
-                print(f"  💸 Стратегия: Весь доступный баланс с каждого кошелька")
+                print(f"  💸 Стратегия: Весь доступный баланс с каждого кошелька (минус резерв)")
             else:
                 total_per_wallet = settings.trading.trade_amount_sol * settings.trading.num_purchases
-                total_overall = total_per_wallet * wallet_count
+                gas_per_wallet = 0.015  # Увеличенный резерв
+                total_needed_per_wallet = total_per_wallet + gas_per_wallet
+                total_overall = total_needed_per_wallet * wallet_count
                 print(
                     f"  💸 Стратегия: {settings.trading.trade_amount_sol} SOL x {settings.trading.num_purchases} с каждого кошелька")
-                print(f"  📈 Общий объем: {total_overall} SOL")
+                print(f"  📈 Нужно SOL на кошелек: {total_needed_per_wallet:.6f} SOL (включая газ)")
+                print(f"  📊 Общий объем: {total_overall:.6f} SOL")
         else:
             total_investment = settings.trading.trade_amount_sol * settings.trading.num_purchases
+            gas_reserve = 0.015
+            total_needed = total_investment + gas_reserve
             print(f"  📱 Режим: Одиночный кошелек")
             print(
                 f"  💸 Сумма покупки: {settings.trading.trade_amount_sol} SOL x {settings.trading.num_purchases} = {total_investment} SOL")
+            print(f"  📊 Всего нужно: {total_needed:.6f} SOL (включая газ)")
 
         print()
+
+
 
     def get_token_input(self) -> str:
         """Получить контракт токена от пользователя"""
@@ -184,8 +193,96 @@ class EmergencyBuyer:
             logger.warning("⚠️ Пропускаем health check и пробуем торговать напрямую")
             return True
 
+    async def check_wallet_balance_before_trade(self, token_contract: str) -> bool:
+        """Проверка баланса кошелька перед торговлей - НОВАЯ ФУНКЦИЯ"""
+        try:
+            print("\n💰 ПРОВЕРКА БАЛАНСА КОШЕЛЬКОВ...")
+            print("=" * 50)
+
+            if (hasattr(jupiter_trader, 'multi_wallet_manager') and
+                    jupiter_trader.multi_wallet_manager and
+                    self.multi_wallet_config.is_enabled()):
+
+                # Проверка множественных кошельков
+                print("🎭 Проверка множественных кошельков:")
+
+                wallets_with_funds = 0
+                total_available_sol = 0.0
+                gas_reserve_per_wallet = 0.015  # Резерв на газ
+
+                for i, wallet in enumerate(self.multi_wallet_config.wallets):
+                    try:
+                        # Получаем баланс
+                        balance_response = await jupiter_trader.solana_client.get_balance(wallet.keypair.pubkey())
+                        sol_balance = balance_response.value / 1e9
+
+                        # Вычисляем доступную сумму (баланс - резерв на газ)
+                        available_balance = max(0, sol_balance - gas_reserve_per_wallet)
+
+                        wallet_addr = str(wallet.keypair.pubkey())
+                        short_addr = f"{wallet_addr[:8]}...{wallet_addr[-8:]}"
+
+                        if available_balance > 0.001:  # Минимум 0.001 SOL для торговли
+                            print(f"  ✅ {short_addr}: {sol_balance:.6f} SOL (доступно: {available_balance:.6f})")
+                            wallets_with_funds += 1
+                            total_available_sol += available_balance
+                        else:
+                            print(f"  ❌ {short_addr}: {sol_balance:.6f} SOL (недостаточно средств)")
+
+                    except Exception as e:
+                        print(f"  ❌ {short_addr}: Ошибка проверки баланса - {e}")
+
+                print(f"\n📊 Итого:")
+                print(f"  💰 Кошельков с средствами: {wallets_with_funds}/{len(self.multi_wallet_config.wallets)}")
+                print(f"  🪙 Общий доступный баланс: {total_available_sol:.6f} SOL")
+
+                if wallets_with_funds == 0:
+                    print("❌ НЕТ КОШЕЛЬКОВ С ДОСТАТОЧНЫМИ СРЕДСТВАМИ!")
+                    return False
+
+            else:
+                # Проверка одиночного кошелька
+                print("📱 Проверка основного кошелька:")
+
+                try:
+                    main_wallet = jupiter_trader.executor.wallet_keypair
+                    balance_response = await jupiter_trader.solana_client.get_balance(main_wallet.pubkey())
+                    sol_balance = balance_response.value / 1e9
+
+                    # Рассчитываем сколько SOL нужно
+                    required_sol = settings.trading.trade_amount_sol * settings.trading.num_purchases
+                    gas_reserve = 0.015  # Резерв на газ
+                    total_required = required_sol + gas_reserve
+
+                    wallet_addr = str(main_wallet.pubkey())
+                    short_addr = f"{wallet_addr[:8]}...{wallet_addr[-8:]}"
+
+                    print(f"  🏦 Кошелек: {short_addr}")
+                    print(f"  💰 Текущий баланс: {sol_balance:.6f} SOL")
+                    print(f"  🎯 Требуется для торговли: {required_sol:.6f} SOL")
+                    print(f"  ⛽ Резерв на газ: {gas_reserve:.6f} SOL")
+                    print(f"  📊 Всего требуется: {total_required:.6f} SOL")
+
+                    if sol_balance < total_required:
+                        print(f"  ❌ НЕДОСТАТОЧНО СРЕДСТВ! Не хватает: {total_required - sol_balance:.6f} SOL")
+                        return False
+                    else:
+                        print(f"  ✅ Средств достаточно! Остаток после торговли: {sol_balance - total_required:.6f} SOL")
+
+                except Exception as e:
+                    print(f"  ❌ Ошибка проверки баланса: {e}")
+                    return False
+
+            print("\n✅ Проверка баланса завершена успешно")
+            return True
+
+        except Exception as e:
+            logger.error(f"❌ Ошибка проверки баланса: {e}")
+            print(f"❌ Ошибка проверки баланса: {e}")
+            return False
+
     async def execute_emergency_buy(self, token_contract: str):
-        """Выполнение аварийной покупки с правильным подсчетом токенов"""
+        """Выполнение аварийной покупки с проверкой баланса - ИСПРАВЛЕННАЯ ВЕРСИЯ"""
         print(f"\n🎯 НАЧИНАЕМ ПОКУПКУ: {token_contract}")
         print("=" * 60)
 
@@ -193,6 +290,12 @@ class EmergencyBuyer:
         await jupiter_trader.start()
 
         try:
+            # НОВОЕ: Проверяем баланс ПЕРЕД торговлей
+            if not await self.check_wallet_balance_before_trade(token_contract):
+                print("\n❌ ПОКУПКА ОТМЕНЕНА: Недостаточно средств!")
+                print("💡 Пополните кошелек(и) и попробуйте снова")
+                return
+
             start_time = time.time()
 
             # Создаем сигнал для торговли
@@ -209,9 +312,10 @@ class EmergencyBuyer:
                     jupiter_trader.multi_wallet_manager and
                     self.multi_wallet_config.is_enabled()):
 
-                print("🎭 Режим: Множественные кошельки")
+                print("\n🎭 Режим: Множественные кошельки")
 
                 if self.multi_wallet_config.use_max_available_balance:
+                    print("💰 Стратегия: Весь доступный баланс (с резервом на газ)")
                     result = await jupiter_trader.multi_wallet_manager.execute_multi_wallet_trades(
                         token_address=token_contract,
                         base_trade_amount=0,
@@ -219,6 +323,7 @@ class EmergencyBuyer:
                         source_info=trading_signal
                     )
                 else:
+                    print(f"💰 Стратегия: {settings.trading.trade_amount_sol} SOL x {settings.trading.num_purchases}")
                     result = await jupiter_trader.multi_wallet_manager.execute_multi_wallet_trades(
                         token_address=token_contract,
                         base_trade_amount=settings.trading.trade_amount_sol,
@@ -226,12 +331,12 @@ class EmergencyBuyer:
                         source_info=trading_signal
                     )
 
-                # ИСПРАВЛЕНО: Детальные результаты с правильным подсчетом токенов
+                # Результаты множественных кошельков
                 print(f"\n🎉 ПОКУПКА ЗАВЕРШЕНА!")
                 print("=" * 60)
                 print(f"✅ Успешных сделок: {result.successful_trades}/{result.total_trades}")
                 print(f"💰 Потрачено SOL: {result.total_sol_spent:.6f}")
-                print(f"🪙 Куплено токенов: {result.total_tokens_bought:,.6f}")  # Уже исправлено в manager
+                print(f"🪙 Куплено токенов: {result.total_tokens_bought:,.6f}")
                 print(f"⏱️ Общее время: {(time.time() - start_time):.1f}s")
                 print(f"📊 Скорость: {result.execution_time_ms:.0f}ms")
 
@@ -242,7 +347,8 @@ class EmergencyBuyer:
                 successful_wallets = 0
                 for wallet_addr, trade_result in result.wallet_results:
                     status = "✅" if trade_result.success else "❌"
-                    print(f"{status} {wallet_addr[:8]}...{wallet_addr[-8:]}")
+                    short_addr = f"{wallet_addr[:8]}...{wallet_addr[-8:]}"
+                    print(f"{status} {short_addr}")
 
                     if trade_result.success:
                         successful_wallets += 1
@@ -256,7 +362,7 @@ class EmergencyBuyer:
                     print()
 
             else:
-                print("📱 Режим: Одиночный кошелек")
+                print("\n📱 Режим: Одиночный кошелек")
 
                 results = await jupiter_trader.execute_sniper_trades(
                     token_address=token_contract,
@@ -271,7 +377,7 @@ class EmergencyBuyer:
 
                 if successful:
                     total_sol = sum(r.input_amount for r in successful)
-                    total_tokens = sum(r.output_amount or 0 for r in successful)  # Уже исправлено в executor
+                    total_tokens = sum(r.output_amount or 0 for r in successful)
                     print(f"💰 Потрачено SOL: {total_sol:.6f}")
                     print(f"🪙 Куплено токенов: {total_tokens:,.6f}")
                     print(f"⏱️ Общее время: {(time.time() - start_time):.1f}s")
@@ -466,6 +572,7 @@ class EmergencyBuyer:
         print("🎭 Поддерживает как один кошелек, так и множественные")
         print("🛡️ Все проверки безопасности работают как в основном боте")
         print()
+
 
 
 async def main():
