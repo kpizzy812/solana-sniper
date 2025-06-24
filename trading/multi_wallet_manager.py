@@ -10,6 +10,7 @@ from solana.rpc.commitment import Confirmed
 
 from config.multi_wallet import MultiWalletConfig, MultiWalletInfo
 from trading.jupiter.models import TradeResult
+from utils.rate_limiter import rate_limited
 
 
 @dataclass
@@ -461,7 +462,7 @@ class MultiWalletManager:
 
         logger.debug("🔄 Обновление балансов множественных кошельков...")
 
-        batch_size = 1  # 8 кошельков одновременно для Helius 10 RPS
+        batch_size = 5  # 8 кошельков одновременно для Helius 10 RPS
 
         for i in range(0, len(self.config.wallets), batch_size):
             batch = self.config.wallets[i:i + batch_size]
@@ -483,7 +484,7 @@ class MultiWalletManager:
 
             # Пауза между батчами (кроме последнего)
             if i + batch_size < len(self.config.wallets):
-                await asyncio.sleep(0.5)  # 200ms между батчами
+                await asyncio.sleep(0.1)  # 200ms между батчами
 
         total_balance = sum(w.balance_sol for w in self.config.wallets)
         available_balance = sum(w.available_balance for w in self.config.wallets)
@@ -511,6 +512,7 @@ class MultiWalletManager:
 
         logger.debug(f"💰 Обновлены балансы: {total_balance:.4f} SOL общий, {available_balance:.4f} SOL доступно")
 
+    @rate_limited('solana_rpc')  # Добавить эту строку
     async def _get_wallet_balance(self, wallet: MultiWalletInfo) -> float:
         """Получение баланса конкретного кошелька"""
         try:
