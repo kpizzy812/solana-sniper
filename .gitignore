@@ -13,6 +13,7 @@ wallet_key.py
 keypair.json
 *.session
 /wallets
+~/.wallets/
 generated_wallets.json
 
 # Python

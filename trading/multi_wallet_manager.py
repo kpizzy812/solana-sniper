@@ -284,8 +284,15 @@ class MultiWalletManager:
             account_info = await self.jupiter_trader.executor.solana_client.get_account_info(ata, commitment=Confirmed)
 
             if not account_info.value:
-                logger.debug(f"💰 ATA не найден для {str(wallet_pubkey)[:8]}...")
-                return 0.0
+                # Ждем создания ATA и проверяем еще раз
+                await asyncio.sleep(3)
+                account_info = await self.solana_client.get_account_info(ata, commitment=Confirmed)
+
+                if not account_info.value:
+                    logger.debug(f"💰 ATA не найден для {str(wallet_pubkey)[:8]}...")
+                    return 0.0
+
+            data = account_info.value.data
 
             data = account_info.value.data
 

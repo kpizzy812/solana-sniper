@@ -219,7 +219,8 @@ class JupiterTradeExecutor:
             swap_request = SwapRequest(
                 quote_response=quote,
                 user_public_key=str(self.wallet_keypair.pubkey()),
-                priority_fee_lamports=settings.trading.priority_fee
+                priority_fee_lamports=settings.trading.priority_fee,
+                destination_token_account=None
             )
 
             # Шаг 3: Получаем транзакцию обмена
@@ -507,8 +508,15 @@ class JupiterTradeExecutor:
             account_info = await self.solana_client.get_account_info(ata, commitment=Confirmed)
 
             if not account_info.value:
-                logger.debug(f"💰 ATA не найден для {str(wallet_pubkey)[:8]}...")
-                return 0.0
+                # Ждем создания ATA и проверяем еще раз
+                await asyncio.sleep(3)
+                account_info = await self.solana_client.get_account_info(ata, commitment=Confirmed)
+
+                if not account_info.value:
+                    logger.debug(f"💰 ATA не найден для {str(wallet_pubkey)[:8]}...")
+                    return 0.0
+
+            data = account_info.value.data
 
             data = account_info.value.data
 
@@ -612,7 +620,8 @@ class JupiterTradeExecutor:
             swap_request = SwapRequest(
                 quote_response=quote,
                 user_public_key=str(self.wallet_keypair.pubkey()),
-                priority_fee_lamports=settings.trading.priority_fee
+                priority_fee_lamports=settings.trading.priority_fee,
+                destination_token_account=None
             )
 
             # Шаг 3: Получаем транзакцию обмена

@@ -110,7 +110,6 @@ class SwapRequest:
             'feeAccount': self.fee_account,
             'asLegacyTransaction': self.as_legacy_transaction,
             'useTokenLedger': self.use_token_ledger,
-            'destinationTokenAccount': self.destination_token_account,
             'dynamicComputeUnitLimit': self.dynamic_compute_unit_limit,
             'prioritizationFeeLamports': {
                 'priorityLevelWithMaxLamports': {
