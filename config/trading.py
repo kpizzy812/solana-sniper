@@ -128,7 +128,7 @@ class PerformanceConfig:
 
     # Параллельность
     max_concurrent_monitors: int = int(os.getenv('MAX_CONCURRENT_MONITORS', '10'))
-    max_concurrent_trades: int = int(os.getenv('MAX_CONCURRENT_TRADES', '59'))
+    max_concurrent_trades: int = int(os.getenv('MAX_CONCURRENT_TRADES', '5'))
 
     # Оптимизация памяти
     enable_cache_cleanup: bool = os.getenv('ENABLE_CACHE_CLEANUP', 'true').lower() in ['true', '1', 'yes']

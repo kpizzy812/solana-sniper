@@ -67,8 +67,10 @@ class MultiWalletConfig:
     amount_variation_percent: float = float(os.getenv('AMOUNT_VARIATION_PERCENT', '15'))  # ±15%
 
     # Задержка между покупками
-    initial_delay_seconds: float = float(os.getenv('INITIAL_TRADING_DELAY', '15'))  # 15 сек задержка
-    inter_trade_delay: tuple = (0.25, 0.6)  # Задержка между сделками разных кошельков
+    initial_delay_seconds: float = float(os.getenv('INITIAL_TRADING_DELAY', '15'))
+    # 🎯 НОВЫЕ настройки задержек - более реалистичные и настраиваемые
+    min_inter_trade_delay: float = float(os.getenv('MIN_INTER_TRADE_DELAY', '1.2'))  # Минимум 1.2с
+    max_inter_trade_delay: float = float(os.getenv('MAX_INTER_TRADE_DELAY', '4.8'))  # Максимум 4.8с
 
     # Загруженные кошельки
     wallets: List[MultiWalletInfo] = None
@@ -238,9 +240,14 @@ class MultiWalletConfig:
         logger.debug(f"💫 Рандомизация: {base_amount} SOL → {randomized_amount} SOL ({variation * 100:+.1f}%)")
         return randomized_amount
 
+    @property
+    def inter_trade_delay(self) -> tuple:
+        """Получение диапазона задержек между сделками"""
+        return (self.min_inter_trade_delay, self.max_inter_trade_delay)
+
     def get_inter_trade_delay(self) -> float:
         """Получение случайной задержки между сделками"""
-        return random.uniform(*self.inter_trade_delay)
+        return random.uniform(self.min_inter_trade_delay, self.max_inter_trade_delay)
 
     def get_stats(self) -> dict:
         """Статистика множественных кошельков"""

@@ -288,36 +288,87 @@ class JupiterAPIClient:
             return None
 
     async def health_check(self) -> Dict:
-        """Проверка здоровья Jupiter API"""
+        """Проверка здоровья Jupiter API - ИСПРАВЛЕНО для платного API"""
+        test_url = "unknown"
+        endpoint_type = "unknown"
+        status_code = None
+
         try:
-            # Проверяем Jupiter API - используем правильный бесплатный endpoint
-            test_url = f"{settings.jupiter.lite_api_url}/quote"
+            # ✅ ПРАВИЛЬНАЯ логика для платного API
+            if settings.jupiter.api_key and not settings.jupiter.use_lite_api:
+                # Платный API - используем api.jup.ag
+                test_url = f"{settings.jupiter.api_url}/quote"
+                headers = {
+                    'Content-Type': 'application/json',
+                    'x-api-key': settings.jupiter.api_key
+                }
+                endpoint_type = "платный (api.jup.ag)"
+            else:
+                # Бесплатный API - используем lite-api.jup.ag
+                test_url = f"{settings.jupiter.lite_api_url}/quote"
+                headers = {
+                    'Content-Type': 'application/json'
+                }
+                endpoint_type = "бесплатный (lite-api.jup.ag)"
+
+            # Параметры для тестового quote
             params = {
-                'inputMint': 'So11111111111111111111111111111111111111112',
-                'outputMint': 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v',
-                'amount': '1000000',
-                'slippageBps': '50'
+                'inputMint': 'So11111111111111111111111111111111111111112',  # SOL
+                'outputMint': 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v',  # USDC
+                'amount': '1000000',  # 0.001 SOL
+                'slippageBps': '50'  # 0.5% slippage
             }
 
-            async with self.session.get(test_url, params=params) as resp:
+            logger.debug(f"🔍 Health check {endpoint_type}: {test_url}")
+
+            async with self.session.get(test_url, params=params, headers=headers) as resp:
+                status_code = resp.status
                 jupiter_healthy = resp.status == 200
-                if resp.status != 200:
+
+                if resp.status == 200:
+                    response_data = await resp.json()
+                    # Проверяем что ответ содержит ожидаемые поля
+                    if 'inAmount' in response_data and 'outAmount' in response_data:
+                        logger.success(f"✅ Jupiter {endpoint_type} работает корректно")
+                    else:
+                        logger.warning(f"⚠️ Jupiter API ответил, но без ожидаемых данных")
+                        jupiter_healthy = False
+                elif resp.status == 401:
                     error_text = await resp.text()
-                    logger.error(f"❌ Jupiter API тест не прошел: {resp.status} - {error_text}")
+                    logger.error(f"❌ 401 Unauthorized - проверьте API ключ: {error_text}")
+                    jupiter_healthy = False
+                elif resp.status == 429:
+                    error_text = await resp.text()
+                    logger.warning(f"⚠️ 429 Rate Limit: {error_text}")
+                    jupiter_healthy = False
+                elif resp.status >= 500:
+                    error_text = await resp.text()
+                    logger.warning(f"⚠️ {resp.status} Серверная ошибка Jupiter: {error_text}")
+                    jupiter_healthy = False
                 else:
-                    logger.info("✅ Jupiter lite-api endpoint работает")
+                    error_text = await resp.text()
+                    logger.error(f"❌ Jupiter API ошибка {resp.status}: {error_text}")
+                    jupiter_healthy = False
 
             return {
                 "jupiter_api": "healthy" if jupiter_healthy else "error",
-                "jupiter_endpoint": settings.jupiter.lite_api_url,
+                "jupiter_endpoint": test_url,
+                "endpoint_type": endpoint_type,
                 "api_key_configured": bool(settings.jupiter.api_key),
                 "use_lite_api": settings.jupiter.use_lite_api,
-                "cache_size": len(self.quote_cache)
+                "cache_size": len(self.quote_cache),
+                "status_code": status_code
             }
 
         except Exception as e:
             logger.error(f"❌ Ошибка health check Jupiter API: {e}")
-            return {"jupiter_api": "error", "message": str(e)}
+            return {
+                "jupiter_api": "error",
+                "message": str(e),
+                "jupiter_endpoint": test_url,
+                "endpoint_type": endpoint_type,
+                "status_code": status_code
+            }
 
     def clear_cache(self):
         """Очистка кэша котировок"""

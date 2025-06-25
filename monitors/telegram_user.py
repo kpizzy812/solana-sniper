@@ -423,10 +423,7 @@ class UltraFastTelegramUserMonitor:
 
                     return
 
-                logger.critical(f"🎯 СООБЩЕНИЕ ИЗ МОНИТОРИМОГО ЧАТА!")
-                logger.critical(f"   📍 Chat ID: {chat_id}")
-                logger.critical(f"   🏷️ Identifier: {chat_identifier}")
-                logger.critical(f"   📝 Message ID: {message_id}")
+                logger.debug(f"📥 Сообщение из {chat_identifier}: ID {message_id}")
 
                 # Обрабатываем сообщение
                 await self.process_message(event, target_entity, chat_identifier)
@@ -499,7 +496,7 @@ class UltraFastTelegramUserMonitor:
             )
 
             # Логируем получение сообщения
-            logger.info(f"💬 НОВОЕ СООБЩЕНИЕ в {post.chat_title}: @{post.author_username} - {post.content[:100]}...")
+            logger.debug(f"💬 @{post.author_username}: {post.content[:50]}...")
 
             # Фильтрация сообщений
             if post.message_type == 'group' and not post.is_admin:
