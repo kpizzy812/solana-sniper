@@ -112,9 +112,9 @@ class SolanaConfig:
     batch_delay_ms: int = int(os.getenv('WALLET_BATCH_DELAY_MS', '50'))  # 50ms между батчами
 
     # Таймауты и ретраи:
-    rpc_timeout_seconds: float = float(os.getenv('SOLANA_RPC_TIMEOUT', '30.0'))
-    max_retries: int = int(os.getenv('SOLANA_RPC_MAX_RETRIES', '3'))
-    retry_delay_seconds: float = float(os.getenv('SOLANA_RPC_RETRY_DELAY', '1.0'))
+    rpc_timeout_seconds: float = float(os.getenv('SOLANA_RPC_TIMEOUT', '1.0'))
+    max_retries: int = int(os.getenv('SOLANA_RPC_MAX_RETRIES', '2'))
+    retry_delay_seconds: float = float(os.getenv('SOLANA_RPC_RETRY_DELAY', '0.1'))
 
     def __post_init__(self):
         """Логирование конфигурации Solana RPC"""

@@ -17,7 +17,6 @@ from .executor import JupiterTradeExecutor
 from .security import JupiterSecurityChecker
 from trading.multi_wallet_manager import MultiWalletManager
 from config.multi_wallet import MultiWalletConfig
-import asyncio
 
 
 
@@ -48,7 +47,7 @@ class UltraFastJupiterTrader:
             self.solana_client = AsyncClient(
                 endpoint=settings.solana.rpc_url,
                 commitment=Confirmed,
-                timeout=1,  # ДОБАВЛЕНО: timeout 30 секунд
+                timeout=30,  # ДОБАВЛЕНО: timeout 30 секунд
                 extra_headers={
                     'User-Agent': 'MORI-Sniper-Bot/1.0'
                 }
@@ -210,7 +209,7 @@ class UltraFastJupiterTrader:
         return await self.executor.get_sol_balance()
 
     async def health_check(self) -> Dict:
-        """ИСПРАВЛЕННАЯ проверка здоровья с восстановлением RPC"""
+        """Проверка здоровья всей торговой системы"""
         try:
             health_data = {
                 "status": "healthy",
@@ -219,62 +218,17 @@ class UltraFastJupiterTrader:
                 "stats": {}
             }
 
-            # ИСПРАВЛЕНО: Проверяем Solana RPC с восстановлением
+            # Проверяем Solana RPC
             try:
                 if self.solana_client:
-                    response = await asyncio.wait_for(
-                        self.solana_client.get_version(),
-                        timeout=10
-                    )
-                    if response and response.value:
-                        health_data["components"]["solana_rpc"] = "healthy"
-                        logger.debug(f"✅ Solana RPC здоров")
-                    else:
-                        raise Exception("Empty response from RPC")
+                    response = await self.solana_client.get_version()
+                    health_data["components"]["solana_rpc"] = "healthy" if response.value else "error"
                 else:
                     health_data["components"]["solana_rpc"] = "not_initialized"
-
-            except (asyncio.TimeoutError, Exception) as e:
-                logger.warning(f"❌ RPC проблема: {e}")
+            except Exception as e:
                 health_data["components"]["solana_rpc"] = f"error: {e}"
+                logger.error(f"❌ Ошибка подключения к Solana RPC: {e}")
 
-                # ДОБАВЛЕНО: Попытка восстановить RPC соединение
-                try:
-                    logger.info("🔄 Пытаемся восстановить RPC соединение...")
-                    if self.solana_client:
-                        await self.solana_client.close()
-
-                    # Создаем новый клиент
-                    self.solana_client = AsyncClient(
-                        endpoint=settings.solana.rpc_url,
-                        commitment=Confirmed,
-                        timeout=30,
-                        extra_headers={
-                            'User-Agent': 'MORI-Sniper-Bot/1.0'
-                        }
-                    )
-
-                    # Обновляем executor с новым клиентом
-                    if self.executor:
-                        self.executor.solana_client = self.solana_client
-
-                    # Тестируем новое соединение
-                    test_response = await asyncio.wait_for(
-                        self.solana_client.get_version(),
-                        timeout=5
-                    )
-
-                    if test_response and test_response.value:
-                        health_data["components"]["solana_rpc"] = "recovered"
-                        logger.success("✅ RPC соединение восстановлено")
-                    else:
-                        health_data["components"]["solana_rpc"] = "recovery_failed"
-
-                except Exception as recovery_error:
-                    logger.error(f"❌ Не удалось восстановить RPC: {recovery_error}")
-                    health_data["components"]["solana_rpc"] = f"recovery_failed: {recovery_error}"
-
-            # Остальные проверки без изменений...
             # Проверяем Jupiter API
             try:
                 if self.jupiter_client:
