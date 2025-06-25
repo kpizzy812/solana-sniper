@@ -41,7 +41,7 @@ class WalletChecker:
             self.solana_client = AsyncClient(
                 endpoint=settings.solana.rpc_url,
                 commitment=Confirmed,
-                timeout=30  # Увеличиваем таймаут
+                timeout=2  # Увеличиваем таймаут
             )
             logger.info(f"🔗 Подключение к Solana: {settings.solana.rpc_url}")
             return True

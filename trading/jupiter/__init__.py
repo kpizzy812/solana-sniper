@@ -17,6 +17,7 @@ from .executor import JupiterTradeExecutor
 from .security import JupiterSecurityChecker
 from trading.multi_wallet_manager import MultiWalletManager
 from config.multi_wallet import MultiWalletConfig
+import asyncio
 
 
 
@@ -43,13 +44,18 @@ class UltraFastJupiterTrader:
         try:
             logger.info("🚀 Запуск Jupiter торговой системы...")
 
-            # 1. Настройка Solana RPC клиента
+            # 1. ИСПРАВЛЕНО: Настройка Solana RPC клиента с timeout
             self.solana_client = AsyncClient(
                 endpoint=settings.solana.rpc_url,
-                commitment=Confirmed
+                commitment=Confirmed,
+                timeout=1,  # ДОБАВЛЕНО: timeout 30 секунд
+                extra_headers={
+                    'User-Agent': 'MORI-Sniper-Bot/1.0'
+                }
             )
             logger.debug("✅ Solana RPC клиент инициализирован")
 
+            # Остальной код без изменений...
             # 2. Инициализация Jupiter API клиента
             self.jupiter_client = JupiterAPIClient()
             await self.jupiter_client.start()
@@ -67,7 +73,8 @@ class UltraFastJupiterTrader:
                 jupiter_client=self.jupiter_client
             )
             logger.debug("✅ Система безопасности инициализирована")
-            # 5. Инициализация системы множественных кошельков (если доступна и включена)
+
+            # 5. Инициализация системы множественных кошельков
             await self._init_multi_wallet_system()
 
             # 5. Тестируем соединения
@@ -203,7 +210,7 @@ class UltraFastJupiterTrader:
         return await self.executor.get_sol_balance()
 
     async def health_check(self) -> Dict:
-        """Проверка здоровья всей торговой системы"""
+        """ИСПРАВЛЕННАЯ проверка здоровья с восстановлением RPC"""
         try:
             health_data = {
                 "status": "healthy",
@@ -212,17 +219,62 @@ class UltraFastJupiterTrader:
                 "stats": {}
             }
 
-            # Проверяем Solana RPC
+            # ИСПРАВЛЕНО: Проверяем Solana RPC с восстановлением
             try:
                 if self.solana_client:
-                    response = await self.solana_client.get_version()
-                    health_data["components"]["solana_rpc"] = "healthy" if response.value else "error"
+                    response = await asyncio.wait_for(
+                        self.solana_client.get_version(),
+                        timeout=10
+                    )
+                    if response and response.value:
+                        health_data["components"]["solana_rpc"] = "healthy"
+                        logger.debug(f"✅ Solana RPC здоров")
+                    else:
+                        raise Exception("Empty response from RPC")
                 else:
                     health_data["components"]["solana_rpc"] = "not_initialized"
-            except Exception as e:
-                health_data["components"]["solana_rpc"] = f"error: {e}"
-                logger.error(f"❌ Ошибка подключения к Solana RPC: {e}")
 
+            except (asyncio.TimeoutError, Exception) as e:
+                logger.warning(f"❌ RPC проблема: {e}")
+                health_data["components"]["solana_rpc"] = f"error: {e}"
+
+                # ДОБАВЛЕНО: Попытка восстановить RPC соединение
+                try:
+                    logger.info("🔄 Пытаемся восстановить RPC соединение...")
+                    if self.solana_client:
+                        await self.solana_client.close()
+
+                    # Создаем новый клиент
+                    self.solana_client = AsyncClient(
+                        endpoint=settings.solana.rpc_url,
+                        commitment=Confirmed,
+                        timeout=30,
+                        extra_headers={
+                            'User-Agent': 'MORI-Sniper-Bot/1.0'
+                        }
+                    )
+
+                    # Обновляем executor с новым клиентом
+                    if self.executor:
+                        self.executor.solana_client = self.solana_client
+
+                    # Тестируем новое соединение
+                    test_response = await asyncio.wait_for(
+                        self.solana_client.get_version(),
+                        timeout=5
+                    )
+
+                    if test_response and test_response.value:
+                        health_data["components"]["solana_rpc"] = "recovered"
+                        logger.success("✅ RPC соединение восстановлено")
+                    else:
+                        health_data["components"]["solana_rpc"] = "recovery_failed"
+
+                except Exception as recovery_error:
+                    logger.error(f"❌ Не удалось восстановить RPC: {recovery_error}")
+                    health_data["components"]["solana_rpc"] = f"recovery_failed: {recovery_error}"
+
+            # Остальные проверки без изменений...
             # Проверяем Jupiter API
             try:
                 if self.jupiter_client:

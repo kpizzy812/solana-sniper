@@ -477,15 +477,49 @@ class JupiterTradeExecutor:
         session.total_tokens_bought = total_tokens_bought
 
     async def get_sol_balance(self) -> float:
-        """Получение баланса SOL"""
-        try:
-            response = await self.solana_client.get_balance(self.wallet_keypair.pubkey())
-            if response.value:
-                return response.value / 1e9  # Конвертируем lamports в SOL
+        """ИСПРАВЛЕННОЕ получение баланса SOL с retry логикой"""
+        if not self.wallet_keypair:
+            logger.error("❌ Кошелек не инициализирован")
             return 0.0
-        except Exception as e:
-            logger.error(f"❌ Ошибка получения баланса SOL: {e}")
-            return 0.0
+
+        max_retries = 3
+        base_delay = 1.0
+
+        for attempt in range(max_retries):
+            try:
+                logger.debug(f"🔍 Попытка {attempt + 1}: получение баланса кошелька...")
+
+                # Получаем баланс с таймаутом
+                response = await asyncio.wait_for(
+                    self.solana_client.get_balance(self.wallet_keypair.pubkey()),
+                    timeout=1  # Таймаут 15 секунд
+                )
+
+                if response and response.value is not None:
+                    balance_sol = response.value / 1e9  # Конвертируем lamports в SOL
+                    logger.debug(f"✅ Баланс получен: {balance_sol:.6f} SOL")
+                    return balance_sol
+                else:
+                    raise Exception("Пустой ответ от RPC")
+
+            except asyncio.TimeoutError:
+                logger.warning(f"⏰ Попытка {attempt + 1}: таймаут получения баланса")
+                if attempt < max_retries - 1:
+                    wait_time = base_delay * (2 ** attempt)  # Exponential backoff
+                    logger.debug(f"⏳ Пауза {wait_time}s перед повторной попыткой...")
+                    await asyncio.sleep(wait_time)
+
+            except Exception as e:
+                logger.warning(f"❌ Попытка {attempt + 1}: ошибка получения баланса: {e}")
+                if attempt < max_retries - 1:
+                    wait_time = base_delay * (2 ** attempt)
+                    logger.debug(f"⏳ Пауза {wait_time}s перед повторной попыткой...")
+                    await asyncio.sleep(wait_time)
+                else:
+                    logger.error(f"❌ Все попытки получения баланса исчерпаны: {e}")
+
+        logger.error("❌ Не удалось получить баланс кошелька после всех попыток")
+        return 0.0
 
     def get_stats(self) -> Dict:
         """Получение статистики торговли"""
